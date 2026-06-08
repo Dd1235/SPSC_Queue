@@ -54,6 +54,15 @@ public:
 
     std::size_t capacity() const noexcept { return capacity_; }
 
+    // Racy snapshot for metrics/debugging only. Both threads move their
+    // indices concurrently, so the result can be stale the instant it returns
+    // -- never branch on it for correctness, only for monitoring.
+    std::size_t size_approx() const noexcept {
+        const std::size_t w = writeIdx_.load(std::memory_order_relaxed);
+        const std::size_t r = readIdx_.load(std::memory_order_relaxed);
+        return (w >= r) ? (w - r) : (ring_ - r + w);
+    }
+
 private:
     std::size_t capacity_;  // elements the user can store
     std::size_t ring_;      // physical slot count = capacity_ + 1
