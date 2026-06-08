@@ -54,6 +54,34 @@ public:
 
     std::size_t capacity() const noexcept { return capacity_; }
 
+    // Construct an element in place at the write cursor. Returns false (without
+    // blocking) if the queue is full. Producer thread only.
+    template <class... Args>
+    bool try_emplace(Args&&... args) {
+        static_assert(std::is_constructible_v<T, Args&&...>,
+                      "T must be constructible from the given arguments");
+        // I am the only writer of writeIdx_, so a relaxed load is enough --
+        // I just need its current value, no ordering against anyone.
+        const std::size_t w = writeIdx_.load(std::memory_order_relaxed);
+        std::size_t next = w + 1;
+        if (next == ring_) next = 0;
+
+        // Fast path: trust the cached copy of the consumer's index. Only when
+        // it says "full" do we pay for an acquire load of the real (contended)
+        // readIdx_ -- that load is a cross-core coherence miss we skip 99% of
+        // the time.
+        if (next == readIdxCache_) {
+            readIdxCache_ = readIdx_.load(std::memory_order_acquire);
+            if (next == readIdxCache_) return false;  // genuinely full
+        }
+
+        new (&slots_[w]) T(std::forward<Args>(args)...);
+        // Publish: the release pairs with the consumer's acquire so that the
+        // element we just constructed is visible before the new index is.
+        writeIdx_.store(next, std::memory_order_release);
+        return true;
+    }
+
     // Racy snapshot for metrics/debugging only. Both threads move their
     // indices concurrently, so the result can be stale the instant it returns
     // -- never branch on it for correctness, only for monitoring.
