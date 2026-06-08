@@ -88,6 +88,29 @@ public:
     bool try_push(const T& v) { return try_emplace(v); }
     bool try_push(T&& v) { return try_emplace(std::move(v)); }
 
+    // Move the front element into `out` and free its slot. Returns false
+    // (without blocking) if the queue is empty. Consumer thread only.
+    bool try_pop(T& out) {
+        // I am the only writer of readIdx_ -> relaxed load of my own cursor.
+        const std::size_t r = readIdx_.load(std::memory_order_relaxed);
+
+        // Symmetric to the producer: only touch the contended writeIdx_ when
+        // the cached copy claims the queue is empty.
+        if (r == writeIdxCache_) {
+            writeIdxCache_ = writeIdx_.load(std::memory_order_acquire);
+            if (r == writeIdxCache_) return false;  // genuinely empty
+        }
+
+        out = std::move(slots_[r]);
+        slots_[r].~T();
+        std::size_t next = r + 1;
+        if (next == ring_) next = 0;
+        // Release so the producer's acquire sees the slot as free only after
+        // we have finished reading and destroying it.
+        readIdx_.store(next, std::memory_order_release);
+        return true;
+    }
+
     // Racy snapshot for metrics/debugging only. Both threads move their
     // indices concurrently, so the result can be stale the instant it returns
     // -- never branch on it for correctness, only for monitoring.
