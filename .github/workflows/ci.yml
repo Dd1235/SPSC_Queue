@@ -1,0 +1,47 @@
+name: ci
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  build-and-test:
+    name: ${{ matrix.os }} / ${{ matrix.cxx }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { os: ubuntu-latest, cc: gcc,   cxx: g++ }
+          - { os: ubuntu-latest, cc: clang, cxx: clang++ }
+          - { os: macos-latest,  cc: clang, cxx: clang++ }
+    env:
+      CC: ${{ matrix.cc }}
+      CXX: ${{ matrix.cxx }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Configure
+        run: cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
+      - name: Build
+        run: cmake --build build -j
+      - name: Test
+        run: ctest --test-dir build --output-on-failure
+
+  sanitizers:
+    name: ubuntu / clang / ${{ matrix.san }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        san: [TSAN, ASAN]
+    env:
+      CC: clang
+      CXX: clang++
+    steps:
+      - uses: actions/checkout@v4
+      - name: Configure
+        run: cmake -S . -B build -DSPSC_ENABLE_${{ matrix.san }}=ON -DSPSC_BUILD_BENCHMARKS=OFF
+      - name: Build
+        run: cmake --build build -j
+      - name: Test
+        run: ctest --test-dir build --output-on-failure
