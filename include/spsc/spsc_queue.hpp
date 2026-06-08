@@ -6,6 +6,11 @@
 // loads/stores with acquire/release ordering are sufficient and the fast path
 // is wait-free (bounded steps, no loops).
 //
+// The two extra template flags (Padded, Cached) default to the production
+// configuration. They exist so the benchmarks can A/B the two engineering
+// decisions -- cache-line padding and the cached-index optimization -- against
+// a single source of truth rather than a forked copy of the code.
+//
 // See learn/ for the full derivation; the short version lives next to the code.
 #pragma once
 
@@ -26,7 +31,7 @@ inline constexpr std::size_t kCacheLineSize = std::hardware_destructive_interfer
 inline constexpr std::size_t kCacheLineSize = 128;
 #endif
 
-template <class T>
+template <class T, bool Padded = true, bool Cached = true>
 class SPSCQueue {
 public:
     // `capacity` is the number of elements the queue can hold at once. We
@@ -36,7 +41,9 @@ public:
         : capacity_(capacity),
           ring_(capacity + 1),
           slots_(static_cast<T*>(::operator new(ring_ * sizeof(T),
-                                                std::align_val_t{alignof(T)}))) {}
+                                                std::align_val_t{alignof(T)}))) {
+        assert(capacity >= 1 && "capacity must be at least 1");
+    }
 
     ~SPSCQueue() {
         // Destruction is single-threaded: destroy whatever is still live,
@@ -53,10 +60,10 @@ public:
     SPSCQueue(const SPSCQueue&) = delete;
     SPSCQueue& operator=(const SPSCQueue&) = delete;
 
-    std::size_t capacity() const noexcept { return capacity_; }
+    // ---- producer API (one thread only) ----------------------------------
 
     // Construct an element in place at the write cursor. Returns false (without
-    // blocking) if the queue is full. Producer thread only.
+    // blocking) if the queue is full.
     template <class... Args>
     bool try_emplace(Args&&... args) {
         static_assert(std::is_constructible_v<T, Args&&...>,
@@ -67,14 +74,7 @@ public:
         std::size_t next = w + 1;
         if (next == ring_) next = 0;
 
-        // Fast path: trust the cached copy of the consumer's index. Only when
-        // it says "full" do we pay for an acquire load of the real (contended)
-        // readIdx_ -- that load is a cross-core coherence miss we skip 99% of
-        // the time.
-        if (next == readIdxCache_) {
-            readIdxCache_ = readIdx_.load(std::memory_order_acquire);
-            if (next == readIdxCache_) return false;  // genuinely full
-        }
+        if (full_at(next)) return false;
 
         new (&slots_[w]) T(std::forward<Args>(args)...);
         // Publish: the release pairs with the consumer's acquire so that the
@@ -89,18 +89,14 @@ public:
     bool try_push(const T& v) { return try_emplace(v); }
     bool try_push(T&& v) { return try_emplace(std::move(v)); }
 
+    // ---- consumer API (one thread only) ----------------------------------
+
     // Move the front element into `out` and free its slot. Returns false
-    // (without blocking) if the queue is empty. Consumer thread only.
+    // (without blocking) if the queue is empty.
     bool try_pop(T& out) {
         // I am the only writer of readIdx_ -> relaxed load of my own cursor.
         const std::size_t r = readIdx_.load(std::memory_order_relaxed);
-
-        // Symmetric to the producer: only touch the contended writeIdx_ when
-        // the cached copy claims the queue is empty.
-        if (r == writeIdxCache_) {
-            writeIdxCache_ = writeIdx_.load(std::memory_order_acquire);
-            if (r == writeIdxCache_) return false;  // genuinely empty
-        }
+        if (empty_at(r)) return false;
 
         out = std::move(slots_[r]);
         slots_[r].~T();
@@ -114,19 +110,16 @@ public:
 
     // Peek at the front element without removing it; returns nullptr if empty.
     // Pair with pop(). This avoids requiring T to be move-assignable and lets
-    // the consumer inspect an element before deciding to consume it. Consumer
-    // thread only; the returned pointer is valid until the next pop().
+    // the consumer inspect an element before deciding to consume it. The
+    // returned pointer is valid until the next pop().
     T* front() noexcept {
         const std::size_t r = readIdx_.load(std::memory_order_relaxed);
-        if (r == writeIdxCache_) {
-            writeIdxCache_ = writeIdx_.load(std::memory_order_acquire);
-            if (r == writeIdxCache_) return nullptr;
-        }
+        if (empty_at(r)) return nullptr;
         return &slots_[r];
     }
 
     // Remove the element previously observed via front(). Undefined to call on
-    // an empty queue (front() must have returned non-null). Consumer only.
+    // an empty queue (front() must have returned non-null).
     void pop() noexcept {
         const std::size_t r = readIdx_.load(std::memory_order_relaxed);
         assert(r != writeIdx_.load(std::memory_order_acquire) && "pop() on empty queue");
@@ -135,6 +128,10 @@ public:
         if (next == ring_) next = 0;
         readIdx_.store(next, std::memory_order_release);
     }
+
+    // ---- observers --------------------------------------------------------
+
+    std::size_t capacity() const noexcept { return capacity_; }
 
     // Racy snapshot for metrics/debugging only. Both threads move their
     // indices concurrently, so the result can be stale the instant it returns
@@ -146,6 +143,42 @@ public:
     }
 
 private:
+    // Is the slot at `next` the consumer's cursor (i.e. would advancing the
+    // producer collide with it)? With Cached on, we trust our local copy and
+    // only pay for the contended acquire load when it claims "full".
+    bool full_at(std::size_t next) {
+        if constexpr (Cached) {
+            if (next == readIdxCache_) {
+                readIdxCache_ = readIdx_.load(std::memory_order_acquire);
+                return next == readIdxCache_;
+            }
+            return false;
+        } else {
+            return next == readIdx_.load(std::memory_order_acquire);
+        }
+    }
+
+    // Symmetric to full_at: would consuming at `r` outrun the producer?
+    bool empty_at(std::size_t r) {
+        if constexpr (Cached) {
+            if (r == writeIdxCache_) {
+                writeIdxCache_ = writeIdx_.load(std::memory_order_acquire);
+                return r == writeIdxCache_;
+            }
+            return false;
+        } else {
+            return r == writeIdx_.load(std::memory_order_acquire);
+        }
+    }
+
+    // Align hot indices to a cache line only in the padded (production)
+    // configuration; otherwise pack them so the benchmark can show the
+    // false-sharing penalty.
+    static constexpr std::size_t kIdxAlign =
+        Padded ? kCacheLineSize : alignof(std::atomic<std::size_t>);
+    static constexpr std::size_t kTrailingPad =
+        Padded ? (kCacheLineSize - sizeof(std::atomic<std::size_t>) - sizeof(std::size_t)) : 1;
+
     std::size_t capacity_;  // elements the user can store
     std::size_t ring_;      // physical slot count = capacity_ + 1
     T* slots_;              // raw aligned storage for `ring_` objects of T
@@ -153,14 +186,14 @@ private:
     // Producer-owned hot data on its own cache line; consumer-owned on the
     // next. This is the whole false-sharing story -- the two threads never
     // dirty the same line.
-    alignas(kCacheLineSize) std::atomic<std::size_t> writeIdx_{0};
-    std::size_t readIdxCache_{0};   // producer's cached view of readIdx_
+    alignas(kIdxAlign) std::atomic<std::size_t> writeIdx_{0};
+    [[maybe_unused]] std::size_t readIdxCache_{0};   // producer's cached view of readIdx_
 
-    alignas(kCacheLineSize) std::atomic<std::size_t> readIdx_{0};
-    std::size_t writeIdxCache_{0};  // consumer's cached view of writeIdx_
+    alignas(kIdxAlign) std::atomic<std::size_t> readIdx_{0};
+    [[maybe_unused]] std::size_t writeIdxCache_{0};  // consumer's cached view of writeIdx_
 
     // Keep neighbouring heap allocations off the consumer's line.
-    char pad_[kCacheLineSize - sizeof(std::atomic<std::size_t>) - sizeof(std::size_t)]{};
+    char pad_[kTrailingPad]{};
 };
 
 }  // namespace spsc
