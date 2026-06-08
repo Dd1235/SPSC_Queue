@@ -82,6 +82,12 @@ public:
         return true;
     }
 
+    // Copy/move convenience wrappers over try_emplace. Both are wait-free on
+    // the fast path; they return false instead of blocking when full so the
+    // caller owns the back-pressure policy (spin, yield, drop, ...).
+    bool try_push(const T& v) { return try_emplace(v); }
+    bool try_push(T&& v) { return try_emplace(std::move(v)); }
+
     // Racy snapshot for metrics/debugging only. Both threads move their
     // indices concurrently, so the result can be stale the instant it returns
     // -- never branch on it for correctness, only for monitoring.
