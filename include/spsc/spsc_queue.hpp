@@ -10,6 +10,7 @@
 #pragma once
 
 #include <atomic>
+#include <cassert>
 #include <cstddef>
 #include <new>
 #include <type_traits>
@@ -109,6 +110,30 @@ public:
         // we have finished reading and destroying it.
         readIdx_.store(next, std::memory_order_release);
         return true;
+    }
+
+    // Peek at the front element without removing it; returns nullptr if empty.
+    // Pair with pop(). This avoids requiring T to be move-assignable and lets
+    // the consumer inspect an element before deciding to consume it. Consumer
+    // thread only; the returned pointer is valid until the next pop().
+    T* front() noexcept {
+        const std::size_t r = readIdx_.load(std::memory_order_relaxed);
+        if (r == writeIdxCache_) {
+            writeIdxCache_ = writeIdx_.load(std::memory_order_acquire);
+            if (r == writeIdxCache_) return nullptr;
+        }
+        return &slots_[r];
+    }
+
+    // Remove the element previously observed via front(). Undefined to call on
+    // an empty queue (front() must have returned non-null). Consumer only.
+    void pop() noexcept {
+        const std::size_t r = readIdx_.load(std::memory_order_relaxed);
+        assert(r != writeIdx_.load(std::memory_order_acquire) && "pop() on empty queue");
+        slots_[r].~T();
+        std::size_t next = r + 1;
+        if (next == ring_) next = 0;
+        readIdx_.store(next, std::memory_order_release);
     }
 
     // Racy snapshot for metrics/debugging only. Both threads move their
