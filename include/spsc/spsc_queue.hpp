@@ -23,21 +23,18 @@
 
 namespace spsc {
 
-namespace detail {
-#if defined(__cpp_lib_hardware_interference_size)
-inline constexpr std::size_t kStdInterference = std::hardware_destructive_interference_size;
-#else
-inline constexpr std::size_t kStdInterference = 64;
+// We deliberately do NOT use std::hardware_destructive_interference_size.
+// That constant is ABI-frozen per standard library, and the values disagree:
+// it is 64 on libc++/libstdc++ (too small for the Apple M2's 128-byte lines)
+// and 256 on GCC's default x86 tuning -- so the queue's layout would silently
+// differ across compilers. GCC even warns (-Winterference-size) that a
+// public-header use should define its own constant. So we do: 128 bytes covers
+// Apple silicon's 128-byte cache lines and x86's adjacent-line prefetch, and is
+// stable everywhere. Override at build time if you know your target differs.
+#ifndef SPSC_CACHE_LINE_SIZE
+#define SPSC_CACHE_LINE_SIZE 128
 #endif
-}  // namespace detail
-
-// std::hardware_destructive_interference_size is an ABI-frozen compile-time
-// constant -- it is 64 on libc++ and libstdc++ even on Apple silicon, whose
-// cache lines are actually 128 bytes. x86 also pulls the adjacent line on
-// prefetch. Under-padding silently reintroduces false sharing, so we floor the
-// value at 128: the safe "two hot fields never share a line" granularity.
-inline constexpr std::size_t kCacheLineSize =
-    detail::kStdInterference > 128 ? detail::kStdInterference : 128;
+inline constexpr std::size_t kCacheLineSize = SPSC_CACHE_LINE_SIZE;
 
 template <class T, bool Padded = true, bool Cached = true>
 class SPSCQueue {
