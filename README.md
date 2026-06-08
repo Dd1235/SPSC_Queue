@@ -61,10 +61,13 @@ correctness proof.
 
 The producer's hot data and the consumer's hot data live on **different cache
 lines**, so the two cores never invalidate each other's line over MESI. We align
-to **128 bytes, not 64**: `std::hardware_destructive_interference_size` is an
-ABI-frozen `64` on libc++/libstdc++, but the Apple M2 actually has 128-byte
-lines (and x86 prefetches the adjacent line). Under-padding silently
-reintroduces false sharing — so the code floors the value at 128.
+to **128 bytes**, and deliberately *don't* use
+`std::hardware_destructive_interference_size`: that constant disagrees across
+toolchains (`64` on libc++/libstdc++, `256` on GCC's default x86 tuning), which
+would make the queue's layout differ per compiler — GCC even warns that a public
+header should define its own constant instead. 128 covers the Apple M2's 128-byte
+lines and x86's adjacent-line prefetch, and is stable everywhere
+(override with `-DSPSC_CACHE_LINE_SIZE=...`).
 
 ### The cached-index optimization
 
