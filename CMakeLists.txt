@@ -6,6 +6,7 @@ project(spsc_queue LANGUAGES CXX)
 # ---------------------------------------------------------------------------
 option(SPSC_BUILD_TESTS      "Build the test suite"        ON)
 option(SPSC_BUILD_BENCHMARKS "Build the benchmarks"        ON)
+option(SPSC_BUILD_DEMOS      "Build the demos"             ON)
 option(SPSC_ENABLE_TSAN      "Build with ThreadSanitizer"  OFF)
 option(SPSC_ENABLE_ASAN      "Build with Address/UB sanitizer" OFF)
 
@@ -38,4 +39,8 @@ endif()
 
 if(SPSC_BUILD_BENCHMARKS)
     add_subdirectory(benchmarks)
+endif()
+
+if(SPSC_BUILD_DEMOS)
+    add_subdirectory(demo)
 endif()
