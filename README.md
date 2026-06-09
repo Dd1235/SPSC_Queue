@@ -150,13 +150,17 @@ cmake --build build -j
 
 ---
 
-## Demo: hear the difference
+## Demos
 
-[`demo/audio_demo.cpp`](demo/audio_demo.cpp) simulates a real-time audio engine — an
-audio callback that must render a 256-frame buffer every 5.33 ms while a control
-thread streams parameter changes through the queue. If the callback can't get its
-data in time, that buffer becomes silence: an audible click. The same workload runs
-with a `std::mutex` channel and with the lock-free queue.
+Two runnable demos in the two textbook SPSC domains, each measuring a *different*
+property. Both model priority inversion (a thread preempted while holding the lock)
+and compare a `std::mutex` channel against the lock-free queue on the identical
+workload. Details in [demo/README.md](demo/README.md).
+
+**Real-time audio — hear the difference.** [`demo/audio_demo.cpp`](demo/audio_demo.cpp)
+simulates an audio callback that must render a 256-frame buffer every 5.33 ms while a
+control thread streams parameters through the queue. A missed deadline becomes
+silence — an audible click.
 
 ```sh
 cmake --build build --target audio_demo && (cd build/demo && ./audio_demo 4)
@@ -164,11 +168,21 @@ afplay build/demo/audio_mutex.wav      # clicks / dropouts
 afplay build/demo/audio_lockfree.wav   # clean
 ```
 
-Representative result (M2): the mutex channel drops **~20 buffers (~107 ms of
-silence)** with a worst-case wait of **~14 ms** — blocked behind the held lock, well
-past the 5.33 ms budget — while the lock-free queue drops **0** with a worst-case
-wait of **~11 µs**. It models priority inversion (the producer preempted while
-holding the lock); details in [demo/README.md](demo/README.md).
+> M2: mutex drops **~20 buffers (~107 ms of silence)**, worst-case wait **~14 ms**;
+> lock-free drops **0**, worst-case wait **~11 µs**.
+
+**Market data / HFT — the tail latency.** [`demo/marketdata_demo.cpp`](demo/marketdata_demo.cpp)
+simulates a feed handler streaming ticks to a strategy thread that keeps a minimal
+top-of-book. The metric that decides money in trading is the *tail* of
+tick-to-strategy latency.
+
+```sh
+cmake --build build --target marketdata_demo && ./build/demo/marketdata_demo 4
+```
+
+> M2: p50 ~2 µs for **both**, but **p99.9 ~10 ms (mutex) vs ~0.3 ms (lock-free)** —
+> a ~20–70× tail difference — plus ~3000 dropped ticks vs 0. (A full order book /
+> matching engine is deliberately out of scope — the demo measures the *queue*.)
 
 ---
 
