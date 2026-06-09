@@ -150,6 +150,28 @@ cmake --build build -j
 
 ---
 
+## Demo: hear the difference
+
+[`demo/audio_demo.cpp`](demo/audio_demo.cpp) simulates a real-time audio engine — an
+audio callback that must render a 256-frame buffer every 5.33 ms while a control
+thread streams parameter changes through the queue. If the callback can't get its
+data in time, that buffer becomes silence: an audible click. The same workload runs
+with a `std::mutex` channel and with the lock-free queue.
+
+```sh
+cmake --build build --target audio_demo && (cd build/demo && ./audio_demo 4)
+afplay build/demo/audio_mutex.wav      # clicks / dropouts
+afplay build/demo/audio_lockfree.wav   # clean
+```
+
+Representative result (M2): the mutex channel drops **~20 buffers (~107 ms of
+silence)** with a worst-case wait of **~14 ms** — blocked behind the held lock, well
+past the 5.33 ms budget — while the lock-free queue drops **0** with a worst-case
+wait of **~11 µs**. It models priority inversion (the producer preempted while
+holding the lock); details in [demo/README.md](demo/README.md).
+
+---
+
 ## Tests & validation
 
 ```sh
