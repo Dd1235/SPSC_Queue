@@ -9,6 +9,7 @@ function(add_bench name)
 endfunction()
 
 add_bench(bench_throughput)
+add_bench(bench_batch)
 add_bench(bench_vs_mutex)
 add_bench(bench_false_sharing)
 add_bench(bench_cached_index)
