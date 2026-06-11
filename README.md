@@ -1,5 +1,7 @@
 # spsc-queue
 
+![ci](https://github.com/Dd1235/SPSC_Queue/actions/workflows/ci.yml/badge.svg)
+
 A header-only, **lock-free, bounded single-producer/single-consumer ring buffer**
 in C++17 — *wait-free on the common path*, with cache-line-aware layout and a
 cached-index optimization to cut cross-core coherence traffic.
@@ -100,11 +102,13 @@ class SPSCQueue {
     bool try_push(const T& v);
     bool try_push(T&& v);
     template <class... Args> bool try_emplace(Args&&... args);
+    std::size_t try_push_bulk(const T* items, std::size_t n);  // batch; returns count taken
 
     // consumer thread only
     bool try_pop(T& out);
     T*   front();   // peek, nullptr if empty
     void pop();     // pop after front()
+    std::size_t try_pop_bulk(T* out, std::size_t n);           // batch; returns count moved
 
     std::size_t capacity() const;
     std::size_t size_approx() const;   // racy: metrics/debug only
@@ -119,6 +123,13 @@ a single source of truth — not a forked copy of the code.
 can change the instant you read it, so it is safe for metrics but must never gate
 correctness.
 
+The bulk APIs transfer up to `n` items per call and may return a partial count
+(at the full/empty edges). The win is amortization: one relaxed load, at most one
+acquire refresh, and **one release publication per batch** instead of per element
+(DPDK-style). They require nothrow copy construction / move assignment — a copy
+that could throw mid-batch would leave constructed-but-unpublished slots with no
+clean recovery, so those types are rejected at compile time.
+
 ---
 
 ## Benchmarks
@@ -129,7 +140,10 @@ usable affinity on Apple silicon); best of several runs.
 | Benchmark | Result |
 | --- | --- |
 | Throughput (`uint64_t`, capacity 1024) | **~380 Mops/s** (~2.6 ns/op) |
+| Batch throughput (`try_push_bulk`/`try_pop_bulk`, batch 128) | **~1.08 Gops/s** (~2.8× single-op) |
 | vs `std::mutex` + `std::queue` | **~13–15× faster** |
+| vs `rigtorp::SPSCQueue` (reference impl) | **+9%** (353 → 387 Mops/s) |
+| vs `moodycamel::ReaderWriterQueue` | **−7%** (415 vs 387 Mops/s) |
 | False sharing — padded vs packed | **~3× penalty** when packed (2.8–4×) |
 | Cached index — on vs off (capacity 1024) | **~2.2× faster** with caching |
 | Ping-pong round-trip latency | **~100 ns mean** (one-way ~50 ns), p50 ~83 ns |
@@ -138,14 +152,27 @@ The cached-index win is workload-dependent: at *tiny* capacity (16) the queue
 hovers at the full/empty boundary, the cache keeps missing, and caching can cost
 a few percent — being able to explain that crossover is the point.
 
+The library comparison is the credibility check: same generic driver, same
+workload, same capacity, **within ±10% of both reference implementations**. Two
+fairness caveats are printed with the results: rigtorp has no native `try_pop`,
+so its adapter pays an extra move per element; moodycamel rounds its capacity up
+internally. Batch sizes 8/32/128 measure **2.1× / 2.7× / 2.8×** over single-op —
+the value of publishing the index once per batch instead of per element.
+
 ```sh
 cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
 cmake --build build -j
 ./build/benchmarks/bench_throughput
+./build/benchmarks/bench_batch
 ./build/benchmarks/bench_vs_mutex
 ./build/benchmarks/bench_false_sharing
 ./build/benchmarks/bench_cached_index
 ./build/benchmarks/bench_latency
+
+# head-to-head vs rigtorp + moodycamel (fetches them at configure time)
+cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DSPSC_BENCH_THIRDPARTY=ON
+cmake --build build --target bench_vs_libs -j
+./build/benchmarks/bench_vs_libs
 ```
 
 ---
@@ -239,7 +266,7 @@ libraries embody.
   futex/eventfd; note it is then no longer lock-free.
 - **MPMC** → bounded Vyukov queue with per-slot sequence numbers (needs CAS,
   has to handle ABA; lock-free but not wait-free).
-- Batch push/pop, a byte-ring for I/O, huge pages.
+- A byte-ring for I/O, huge pages.
 
 ---
 
