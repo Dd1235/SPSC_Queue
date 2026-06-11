@@ -39,8 +39,10 @@ int main() {
     std::thread server([&] {
         for (int i = 0; i < kWarmup + kIters; ++i) {
             std::uint64_t v = 0;
-            while (!to_server.try_pop(v)) { /* spin */ }
-            while (!to_client.try_push(v)) { /* spin */ }
+            while (!to_server.try_pop(v)) { /* spin */
+            }
+            while (!to_client.try_push(v)) { /* spin */
+            }
         }
     });
 
@@ -50,13 +52,15 @@ int main() {
     auto t_measure_start = bench::Clock::now();
     for (int i = 0; i < kWarmup + kIters; ++i) {
         auto t0 = bench::Clock::now();
-        while (!to_server.try_push(static_cast<std::uint64_t>(i))) { /* spin */ }
+        while (!to_server.try_push(static_cast<std::uint64_t>(i))) { /* spin */
+        }
         std::uint64_t r = 0;
-        while (!to_client.try_pop(r)) { /* spin */ }
+        while (!to_client.try_pop(r)) { /* spin */
+        }
         if (i == kWarmup) t_measure_start = bench::Clock::now();
-        auto ns = std::chrono::duration_cast<std::chrono::nanoseconds>(
-                      bench::Clock::now() - t0)
-                      .count();
+        auto ns =
+            std::chrono::duration_cast<std::chrono::nanoseconds>(bench::Clock::now() - t0)
+                .count();
         if (i >= kWarmup) samples.push_back(static_cast<std::uint64_t>(ns));
     }
     double total_s = bench::seconds_since(t_measure_start);
@@ -69,9 +73,9 @@ int main() {
     std::printf("ping-pong round-trip latency (%d samples)\n", kIters);
     std::printf("  timer resolution : ~%llu ns (percentiles are quantized to this)\n",
                 (unsigned long long)timer_resolution_ns());
-    std::printf("  mean round-trip  : %.0f ns   (one-way ~ %.0f ns)\n",
-                mean_ns, mean_ns / 2.0);
-    std::printf("  p50: %llu ns   p99: %llu ns\n",
-                (unsigned long long)p50, (unsigned long long)p99);
+    std::printf("  mean round-trip  : %.0f ns   (one-way ~ %.0f ns)\n", mean_ns,
+                mean_ns / 2.0);
+    std::printf("  p50: %llu ns   p99: %llu ns\n", (unsigned long long)p50,
+                (unsigned long long)p99);
     return 0;
 }

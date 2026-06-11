@@ -25,8 +25,9 @@ int main() {
         double c = bench::throughput_mops(cached, kCount);
         double u = bench::throughput_mops(uncached, kCount);
 
-        std::printf("capacity=%-4zu  cached: %7.1f Mops/s   uncached: %7.1f Mops/s   speedup: %.2fx\n",
-                    cap, c, u, c / u);
+        std::printf(
+            "capacity=%-4zu  cached: %7.1f Mops/s   uncached: %7.1f Mops/s   speedup: %.2fx\n",
+            cap, c, u, c / u);
     }
     return 0;
 }

@@ -36,17 +36,15 @@ namespace spsc {
 #endif
 inline constexpr std::size_t kCacheLineSize = SPSC_CACHE_LINE_SIZE;
 
-template <class T, bool Padded = true, bool Cached = true>
-class SPSCQueue {
+template <class T, bool Padded = true, bool Cached = true> class SPSCQueue {
 public:
     // `capacity` is the number of elements the queue can hold at once. We
     // allocate one extra slot internally so that "full" and "empty" are
     // distinguishable without a separate contended counter (see push/pop).
     explicit SPSCQueue(std::size_t capacity)
-        : capacity_(capacity),
-          ring_(capacity + 1),
-          slots_(static_cast<T*>(::operator new(ring_ * sizeof(T),
-                                                std::align_val_t{alignof(T)}))) {
+        : capacity_(capacity), ring_(capacity + 1),
+          slots_(static_cast<T*>(
+              ::operator new(ring_ * sizeof(T), std::align_val_t{alignof(T)}))) {
         assert(capacity >= 1 && "capacity must be at least 1");
     }
 
@@ -69,8 +67,7 @@ public:
 
     // Construct an element in place at the write cursor. Returns false (without
     // blocking) if the queue is full.
-    template <class... Args>
-    bool try_emplace(Args&&... args) {
+    template <class... Args> bool try_emplace(Args&&... args) {
         static_assert(std::is_constructible_v<T, Args&&...>,
                       "T must be constructible from the given arguments");
         // I am the only writer of writeIdx_, so a relaxed load is enough --
@@ -192,7 +189,7 @@ private:
     // next. This is the whole false-sharing story -- the two threads never
     // dirty the same line.
     alignas(kIdxAlign) std::atomic<std::size_t> writeIdx_{0};
-    [[maybe_unused]] std::size_t readIdxCache_{0};   // producer's cached view of readIdx_
+    [[maybe_unused]] std::size_t readIdxCache_{0};  // producer's cached view of readIdx_
 
     alignas(kIdxAlign) std::atomic<std::size_t> readIdx_{0};
     [[maybe_unused]] std::size_t writeIdxCache_{0};  // consumer's cached view of writeIdx_

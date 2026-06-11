@@ -12,29 +12,27 @@ inline int g_failures = 0;
 }  // namespace tu
 
 // Non-fatal check: records a failure and keeps going.
-#define CHECK(cond)                                                         \
-    do {                                                                    \
-        if (!(cond)) {                                                      \
-            std::fprintf(stderr, "CHECK failed: %s (%s:%d)\n", #cond,       \
-                         __FILE__, __LINE__);                               \
-            ++::tu::g_failures;                                             \
-        }                                                                   \
+#define CHECK(cond)                                                                           \
+    do {                                                                                      \
+        if (!(cond)) {                                                                        \
+            std::fprintf(stderr, "CHECK failed: %s (%s:%d)\n", #cond, __FILE__, __LINE__);    \
+            ++::tu::g_failures;                                                               \
+        }                                                                                     \
     } while (0)
 
 // Fatal check: aborts the test immediately (used when continuing is pointless).
-#define REQUIRE(cond)                                                       \
-    do {                                                                    \
-        if (!(cond)) {                                                      \
-            std::fprintf(stderr, "REQUIRE failed: %s (%s:%d)\n", #cond,     \
-                         __FILE__, __LINE__);                               \
-            std::exit(1);                                                   \
-        }                                                                   \
+#define REQUIRE(cond)                                                                         \
+    do {                                                                                      \
+        if (!(cond)) {                                                                        \
+            std::fprintf(stderr, "REQUIRE failed: %s (%s:%d)\n", #cond, __FILE__, __LINE__);  \
+            std::exit(1);                                                                     \
+        }                                                                                     \
     } while (0)
 
 // Return 0 if all CHECKs passed, 1 otherwise. Call at the end of main().
-#define TEST_SUMMARY()                                                      \
-    ((::tu::g_failures == 0)                                                \
-         ? (std::printf("OK\n"), 0)                                         \
+#define TEST_SUMMARY()                                                                        \
+    ((::tu::g_failures == 0)                                                                  \
+         ? (std::printf("OK\n"), 0)                                                           \
          : (std::fprintf(stderr, "%d failure(s)\n", ::tu::g_failures), 1))
 
 namespace tu {
@@ -48,18 +46,38 @@ struct Tracked {
 
     int v;
 
-    explicit Tracked(int x = 0) : v(x) { ++alive; ++ctors; }
-    Tracked(const Tracked& o) : v(o.v) { ++alive; ++ctors; }
-    Tracked(Tracked&& o) noexcept : v(o.v) { o.v = -1; ++alive; ++ctors; }
-    Tracked& operator=(const Tracked& o) { v = o.v; return *this; }
+    explicit Tracked(int x = 0) : v(x) {
+        ++alive;
+        ++ctors;
+    }
+    Tracked(const Tracked& o) : v(o.v) {
+        ++alive;
+        ++ctors;
+    }
+    Tracked(Tracked&& o) noexcept : v(o.v) {
+        o.v = -1;
+        ++alive;
+        ++ctors;
+    }
+    Tracked& operator=(const Tracked& o) {
+        v = o.v;
+        return *this;
+    }
     Tracked& operator=(Tracked&& o) noexcept {
         v = o.v;
         o.v = -1;
         return *this;
     }
-    ~Tracked() { --alive; ++dtors; }
+    ~Tracked() {
+        --alive;
+        ++dtors;
+    }
 
-    static void reset() { alive = 0; ctors = 0; dtors = 0; }
+    static void reset() {
+        alive = 0;
+        ctors = 0;
+        dtors = 0;
+    }
 };
 
 // A move-only payload to prove the queue never requires copyability.

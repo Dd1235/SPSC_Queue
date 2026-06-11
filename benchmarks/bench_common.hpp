@@ -29,8 +29,7 @@ inline double seconds_since(Clock::time_point t0) {
 // Stream `count` items producer -> consumer and return throughput in
 // millions of ops/sec (one op == one push paired with one pop). `reps` runs are
 // timed and the best is returned. A short warmup primes caches/branch predictors.
-template <class Queue>
-double throughput_mops(Queue& q, std::uint64_t count, int reps = 3) {
+template <class Queue> double throughput_mops(Queue& q, std::uint64_t count, int reps = 3) {
     auto one_run = [&](std::uint64_t n) {
         auto t0 = Clock::now();
         std::thread consumer([&] {
@@ -41,7 +40,8 @@ double throughput_mops(Queue& q, std::uint64_t count, int reps = 3) {
         });
         std::thread producer([&] {
             for (std::uint64_t i = 0; i < n; ++i) {
-                while (!q.try_push(i)) { /* spin: pure throughput */ }
+                while (!q.try_push(i)) { /* spin: pure throughput */
+                }
             }
         });
         producer.join();
@@ -65,8 +65,7 @@ inline std::uint64_t percentile(std::vector<std::uint64_t>& samples, double p) {
 // A bounded queue guarded by a single std::mutex -- the "obvious" baseline the
 // lock-free version is supposed to beat. Same try_ API as SPSCQueue so the
 // throughput driver above works unchanged.
-template <class T>
-class MutexQueue {
+template <class T> class MutexQueue {
 public:
     explicit MutexQueue(std::size_t capacity) : cap_(capacity) {}
 

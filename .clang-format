@@ -1,0 +1,21 @@
+# Locks in the project's existing style so editor format-on-save agrees with
+# the code as written (VS Code's default C++ formatter otherwise rewrites it
+# to Allman braces and indented namespaces).
+BasedOnStyle: LLVM
+IndentWidth: 4
+ColumnLimit: 95
+PointerAlignment: Left
+AccessModifierOffset: -4
+BreakBeforeBraces: Attach
+NamespaceIndentation: None
+AllowShortFunctionsOnASingleLine: All
+AlignTrailingComments: true
+AlignAfterOpenBracket: Align
+SpacesBeforeTrailingComments: 2
+KeepEmptyLinesAtTheStartOfBlocks: false
+FixNamespaceComments: true
+ReflowComments: false
+SortIncludes: true
+IncludeBlocks: Preserve
+AllowShortIfStatementsOnASingleLine: WithoutElse
+AllowShortLoopsOnASingleLine: true

@@ -94,8 +94,7 @@ static void test_move_only() {
 
 // Exercise every compile-time configuration through the same smoke path so a
 // broken if-constexpr branch is caught.
-template <bool Padded, bool Cached>
-static void smoke_config() {
+template <bool Padded, bool Cached> static void smoke_config() {
     SPSCQueue<int, Padded, Cached> q(4);
     for (int i = 0; i < 50; ++i) {
         REQUIRE(q.try_push(i));
