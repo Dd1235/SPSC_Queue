@@ -47,6 +47,47 @@ static bool run_one(std::size_t capacity, std::uint64_t count, bool yield) {
     return ordered;
 }
 
+// Same invariant, but moved through the bulk APIs in randomly sized chunks so
+// the publication batches keep shifting against the wrap boundary. A wrong
+// release/acquire on the batched publication shows up as a reorder here.
+static bool run_bulk(std::size_t capacity, std::uint64_t count) {
+    spsc::SPSCQueue<std::uint64_t> q(capacity);
+    bool ordered = true;
+
+    std::thread consumer([&] {
+        std::uint64_t expected = 0;
+        std::uint64_t buf[64];
+        unsigned lcg = 0x9e3779b9u;
+        while (expected < count) {
+            lcg = lcg * 1664525u + 1013904223u;
+            std::size_t want = 1 + (lcg >> 16) % 64;
+            std::size_t got = q.try_pop_bulk(buf, want);
+            for (std::size_t i = 0; i < got; ++i) {
+                if (buf[i] != expected) ordered = false;
+                ++expected;
+            }
+            if (got == 0) std::this_thread::yield();
+        }
+    });
+
+    std::thread producer([&] {
+        std::uint64_t next = 0;
+        std::uint64_t buf[64];
+        unsigned lcg = 0x6a09e667u;
+        while (next < count) {
+            lcg = lcg * 1664525u + 1013904223u;
+            std::size_t want = 1 + (lcg >> 16) % 64;
+            if (next + want > count) want = static_cast<std::size_t>(count - next);
+            for (std::size_t i = 0; i < want; ++i) buf[i] = next + i;
+            next += q.try_push_bulk(buf, want);
+        }
+    });
+
+    producer.join();
+    consumer.join();
+    return ordered;
+}
+
 int main() {
     // Big run on the production config: lots of wraparounds, tight spin.
     CHECK((run_one<true, true>(1024, 5'000'000, false)));
@@ -60,6 +101,11 @@ int main() {
     CHECK((run_one<false, true>(64, 1'000'000, false)));
     CHECK((run_one<true, false>(64, 1'000'000, false)));
     CHECK((run_one<false, false>(64, 1'000'000, true)));
+
+    // Bulk transfers: big runs, plus a capacity smaller than the max chunk so
+    // partial pushes/pops and wrap splits happen constantly.
+    CHECK(run_bulk(1024, 5'000'000));
+    CHECK(run_bulk(37, 1'000'000));
 
     return TEST_SUMMARY();
 }
