@@ -27,6 +27,17 @@ jobs:
       - name: Test
         run: ctest --test-dir build --output-on-failure
 
+  thirdparty-bench:
+    name: ubuntu / clang / thirdparty benchmarks
+    runs-on: ubuntu-latest
+    env: { CC: clang, CXX: clang++ }
+    steps:
+      - uses: actions/checkout@v4
+      - name: Configure
+        run: cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DSPSC_BENCH_THIRDPARTY=ON
+      - name: Build
+        run: cmake --build build -j
+
   sanitizers:
     name: ubuntu / clang / ${{ matrix.san }}
     runs-on: ubuntu-latest
