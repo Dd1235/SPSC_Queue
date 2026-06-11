@@ -3,6 +3,7 @@
 #include "spsc/spsc_queue.hpp"
 #include "test_util.hpp"
 
+#include <cstdint>
 #include <string>
 
 using spsc::SPSCQueue;
@@ -92,6 +93,54 @@ static void test_move_only() {
     q.pop();
 }
 
+// Bulk APIs: exactness, partial transfers at the full/empty edges, wrap-split
+// runs, and interop with the single-element ops.
+static void test_bulk_basics() {
+    SPSCQueue<int> q(5);
+    int in[8] = {1, 2, 3, 4, 5, 6, 7, 8};
+    int out[8] = {0};
+
+    CHECK(q.try_push_bulk(in, 8) == 5);  // partial: only capacity fits
+    CHECK(q.try_push_bulk(in, 1) == 0);  // full
+    CHECK(q.size_approx() == 5);
+
+    CHECK(q.try_pop_bulk(out, 3) == 3);
+    CHECK(out[0] == 1 && out[1] == 2 && out[2] == 3);
+
+    // Next push run crosses the ring wrap boundary.
+    CHECK(q.try_push_bulk(in, 3) == 3);
+    CHECK(q.try_pop_bulk(out, 8) == 5);  // partial drain: only 5 present
+    CHECK(out[0] == 4 && out[1] == 5 && out[2] == 1 && out[3] == 2 && out[4] == 3);
+    CHECK(q.try_pop_bulk(out, 1) == 0);  // empty
+
+    // Interop: bulk push, single pop, and vice versa.
+    CHECK(q.try_push_bulk(in, 2) == 2);
+    int v = 0;
+    CHECK(q.try_pop(v) && v == 1);
+    CHECK(q.try_push(9));
+    CHECK(q.try_pop_bulk(out, 8) == 2);
+    CHECK(out[0] == 2 && out[1] == 9);
+}
+
+// Repeated bulk push/pop with co-prime sizes so the runs continually shift
+// against the wrap boundary -- catches segment-split off-by-ones.
+static void test_bulk_wrap_sweep() {
+    SPSCQueue<std::uint64_t> q(7);
+    std::uint64_t next_in = 0, next_out = 0;
+    std::uint64_t buf[4];
+    for (int iter = 0; iter < 10000; ++iter) {
+        std::uint64_t in[3];
+        for (int i = 0; i < 3; ++i) in[i] = next_in + i;
+        next_in += q.try_push_bulk(in, 3);
+        std::size_t got = q.try_pop_bulk(buf, 4);
+        for (std::size_t i = 0; i < got; ++i) {
+            CHECK(buf[i] == next_out);
+            ++next_out;
+        }
+    }
+    CHECK(next_in >= next_out);
+}
+
 // Exercise every compile-time configuration through the same smoke path so a
 // broken if-constexpr branch is caught.
 template <bool Padded, bool Cached> static void smoke_config() {
@@ -111,6 +160,8 @@ int main() {
     test_emplace_inplace();
     test_object_lifetime();
     test_move_only();
+    test_bulk_basics();
+    test_bulk_wrap_sweep();
     smoke_config<true, true>();
     smoke_config<false, true>();
     smoke_config<true, false>();
