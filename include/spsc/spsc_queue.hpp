@@ -91,6 +91,35 @@ public:
     bool try_push(const T& v) { return try_emplace(v); }
     bool try_push(T&& v) { return try_emplace(std::move(v)); }
 
+    // Copy up to `n` items from `items` into the queue. Returns how many were
+    // taken (0..n; partial when the queue fills). The point of the batch API is
+    // amortization: the whole run costs ONE relaxed load of our cursor, at most
+    // one acquire refresh of the consumer's, and ONE release publication --
+    // instead of paying those per element (DPDK-style bulk enqueue).
+    //
+    // T must be nothrow-copy-constructible: if a copy could throw mid-batch we
+    // would hold constructed-but-unpublished slots with no clean recovery, so
+    // we reject those types at compile time (POD payloads all qualify).
+    std::size_t try_push_bulk(const T* items, std::size_t n) {
+        static_assert(std::is_nothrow_copy_constructible_v<T>,
+                      "try_push_bulk requires nothrow copy construction");
+        const std::size_t w = writeIdx_.load(std::memory_order_relaxed);
+        std::size_t free = free_slots(w);
+        if (free < n) {
+            refresh_read_cache();
+            free = free_slots(w);
+        }
+        const std::size_t m = (n < free) ? n : free;
+        // The run [w, w+m) may wrap: construct in up to two contiguous segments.
+        std::size_t idx = w;
+        for (std::size_t i = 0; i < m; ++i) {
+            new (&slots_[idx]) T(items[i]);
+            if (++idx == ring_) idx = 0;
+        }
+        if (m != 0) writeIdx_.store(idx, std::memory_order_release);
+        return m;
+    }
+
     // ---- consumer API (one thread only) ----------------------------------
 
     // Move the front element into `out` and free its slot. Returns false
@@ -108,6 +137,30 @@ public:
         // we have finished reading and destroying it.
         readIdx_.store(next, std::memory_order_release);
         return true;
+    }
+
+    // Move up to `n` items from the queue into `out`. Returns how many were
+    // moved (0..n; partial when the queue runs dry). Mirror of try_push_bulk:
+    // one relaxed load, at most one acquire refresh, one release publication
+    // for the whole run.
+    std::size_t try_pop_bulk(T* out, std::size_t n) {
+        static_assert(std::is_nothrow_move_assignable_v<T>,
+                      "try_pop_bulk requires nothrow move assignment");
+        const std::size_t r = readIdx_.load(std::memory_order_relaxed);
+        std::size_t avail = avail_items(r);
+        if (avail < n) {
+            refresh_write_cache();
+            avail = avail_items(r);
+        }
+        const std::size_t m = (n < avail) ? n : avail;
+        std::size_t idx = r;
+        for (std::size_t i = 0; i < m; ++i) {
+            out[i] = std::move(slots_[idx]);
+            slots_[idx].~T();
+            if (++idx == ring_) idx = 0;
+        }
+        if (m != 0) readIdx_.store(idx, std::memory_order_release);
+        return m;
     }
 
     // Peek at the front element without removing it; returns nullptr if empty.
@@ -158,6 +211,40 @@ private:
         } else {
             return next == readIdx_.load(std::memory_order_acquire);
         }
+    }
+
+    // Free slots ahead of the producer at cursor `w` (how many pushes fit
+    // before colliding with the consumer). Uses the cached consumer index in
+    // the cached config; the bulk caller refreshes the cache once if short.
+    std::size_t free_slots(std::size_t w) {
+        std::size_t r;
+        if constexpr (Cached) {
+            r = readIdxCache_;
+        } else {
+            r = readIdx_.load(std::memory_order_acquire);
+        }
+        std::size_t free = r + ring_ - w - 1;
+        if (free >= ring_) free -= ring_;
+        return free;
+    }
+    void refresh_read_cache() {
+        if constexpr (Cached) readIdxCache_ = readIdx_.load(std::memory_order_acquire);
+    }
+
+    // Items available to the consumer at cursor `r` (symmetric to free_slots).
+    std::size_t avail_items(std::size_t r) {
+        std::size_t w;
+        if constexpr (Cached) {
+            w = writeIdxCache_;
+        } else {
+            w = writeIdx_.load(std::memory_order_acquire);
+        }
+        std::size_t avail = w + ring_ - r;
+        if (avail >= ring_) avail -= ring_;
+        return avail;
+    }
+    void refresh_write_cache() {
+        if constexpr (Cached) writeIdxCache_ = writeIdx_.load(std::memory_order_acquire);
     }
 
     // Symmetric to full_at: would consuming at `r` outrun the producer?
