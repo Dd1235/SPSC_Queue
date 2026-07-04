@@ -10,3 +10,14 @@ target_link_libraries(test_stress PRIVATE spsc::queue spsc_sanitizers Threads::T
 target_compile_options(test_stress PRIVATE -Wall -Wextra)
 add_test(NAME stress COMMAND test_stress)
 set_tests_properties(stress PROPERTIES TIMEOUT 120)
+
+add_executable(test_mpmc_basic test_mpmc_basic.cpp)
+target_link_libraries(test_mpmc_basic PRIVATE spsc::queue spsc_sanitizers Threads::Threads)
+target_compile_options(test_mpmc_basic PRIVATE -Wall -Wextra)
+add_test(NAME mpmc_basic COMMAND test_mpmc_basic)
+
+add_executable(test_mpmc_stress test_mpmc_stress.cpp)
+target_link_libraries(test_mpmc_stress PRIVATE spsc::queue spsc_sanitizers Threads::Threads)
+target_compile_options(test_mpmc_stress PRIVATE -Wall -Wextra)
+add_test(NAME mpmc_stress COMMAND test_mpmc_stress)
+set_tests_properties(mpmc_stress PROPERTIES TIMEOUT 300)
