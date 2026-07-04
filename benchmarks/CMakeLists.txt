@@ -15,6 +15,9 @@ add_bench(bench_false_sharing)
 add_bench(bench_cached_index)
 add_bench(bench_latency)
 
+# The MPMC study's measurement binary (scripts/run_matrix.py drives it).
+add_bench(bench_mpmc)
+
 # Head-to-head against the reference SPSC implementations. Off by default so
 # the normal build needs no network; turn on with -DSPSC_BENCH_THIRDPARTY=ON.
 option(SPSC_BENCH_THIRDPARTY "Fetch rigtorp/moodycamel and build bench_vs_libs" OFF)
@@ -26,7 +29,10 @@ if(SPSC_BENCH_THIRDPARTY)
     FetchContent_Declare(moodycamel_rwq
         GIT_REPOSITORY https://github.com/cameron314/readerwriterqueue.git
         GIT_TAG        v1.0.7)
-    FetchContent_MakeAvailable(rigtorp_spsc moodycamel_rwq)
+    FetchContent_Declare(moodycamel_cq
+        GIT_REPOSITORY https://github.com/cameron314/concurrentqueue.git
+        GIT_TAG        v1.0.4)
+    FetchContent_MakeAvailable(rigtorp_spsc moodycamel_rwq moodycamel_cq)
 
     add_bench(bench_vs_libs)
     # Both are header-only; include their source dirs directly so we do not
@@ -34,4 +40,8 @@ if(SPSC_BENCH_THIRDPARTY)
     target_include_directories(bench_vs_libs PRIVATE
         ${rigtorp_spsc_SOURCE_DIR}/include
         ${moodycamel_rwq_SOURCE_DIR})
+
+    # bench_mpmc gains the moodycamel::ConcurrentQueue reference arm.
+    target_compile_definitions(bench_mpmc PRIVATE SPSC_HAVE_MOODYCAMEL)
+    target_include_directories(bench_mpmc PRIVATE ${moodycamel_cq_SOURCE_DIR})
 endif()
