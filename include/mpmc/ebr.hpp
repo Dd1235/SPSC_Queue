@@ -1,0 +1,197 @@
+// ebr.hpp -- minimal epoch-based reclamation (EBR) for node-based lock-free
+// structures (here: the Michael-Scott queue).
+//
+// The problem it solves: in a node-based lock-free queue, a thread that pops a
+// node cannot immediately `delete` it -- another thread may hold a raw pointer
+// to that node (read before the pop's CAS won). EBR defers the free until no
+// thread can still hold such a pointer.
+//
+// How it works (the classic 3-epoch scheme):
+//   - A global epoch counter advances 0,1,2,...
+//   - Every operation on the data structure pins the current epoch for its
+//     duration (Guard RAII). Pinned threads block epoch advancement.
+//   - retire(p) stamps the node with the current epoch instead of freeing it.
+//   - A node retired in epoch e is freed once the global epoch reaches e+2:
+//     advancing e->e+1 requires every pinned thread to be at e, so by e+2 no
+//     thread that could have seen the node is still inside an operation.
+//
+// Deliberate simplifications (documented for the paper's methodology notes):
+//   - Fixed-size thread registry (kMaxThreads slots), claimed on first use per
+//     thread, released at thread exit.
+//   - Per-thread retire lists are flat vectors scanned during maintenance; a
+//     threshold batches the scans. Simplicity over peak reclamation speed --
+//     reclamation is off the measured hot path.
+//   - A stalled/preempted pinned thread delays reclamation (memory grows) but
+//     never corrupts. This is the well-known EBR tradeoff vs hazard pointers.
+//   - Threads that exit with unreclaimed nodes hand them to a mutex-protected
+//     orphan list (cold path only).
+#pragma once
+
+#include <atomic>
+#include <cassert>
+#include <cstddef>
+#include <cstdint>
+#include <mutex>
+#include <vector>
+
+namespace mpmc::ebr {
+
+inline constexpr std::size_t kMaxThreads = 32;
+inline constexpr std::size_t kRetireThreshold = 64;  // maintenance cadence
+inline constexpr std::uint64_t kIdle = ~0ull;
+
+namespace detail {
+
+struct alignas(128) Slot {
+    std::atomic<std::uint64_t> epoch{kIdle};  // kIdle = not inside an operation
+    std::atomic<bool> used{false};
+};
+
+struct Retired {
+    void* ptr;
+    void (*deleter)(void*);
+    std::uint64_t epoch;
+};
+
+struct Domain {
+    std::atomic<std::uint64_t> globalEpoch{0};
+    Slot slots[kMaxThreads];
+    std::mutex orphanMu;           // cold path: thread exit + orphan drain
+    std::vector<Retired> orphans;  // guarded by orphanMu
+
+    static Domain& instance() {
+        static Domain d;
+        return d;
+    }
+
+    // Advance the global epoch iff every pinned thread is on the current one.
+    // Loads are seq_cst to order against the seq_cst pin stores in Guard.
+    bool try_advance() {
+        const std::uint64_t e = globalEpoch.load(std::memory_order_seq_cst);
+        for (std::size_t i = 0; i < kMaxThreads; ++i) {
+            const std::uint64_t pinned = slots[i].epoch.load(std::memory_order_seq_cst);
+            if (pinned != kIdle && pinned != e) return false;  // straggler
+        }
+        std::uint64_t expected = e;
+        return globalEpoch.compare_exchange_strong(expected, e + 1, std::memory_order_seq_cst,
+                                                   std::memory_order_relaxed);
+    }
+};
+
+// Per-thread registration: claims a Slot on first use, releases at thread exit.
+struct ThreadCtx {
+    Domain& dom = Domain::instance();
+    std::size_t slotIdx = kMaxThreads;
+    int pinDepth = 0;
+    std::vector<Retired> limbo;
+    std::size_t sinceMaintain = 0;
+
+    ThreadCtx() {
+        for (std::size_t i = 0; i < kMaxThreads; ++i) {
+            bool expected = false;
+            if (dom.slots[i].used.compare_exchange_strong(expected, true,
+                                                          std::memory_order_acq_rel)) {
+                slotIdx = i;
+                return;
+            }
+        }
+        assert(false && "ebr: too many concurrent threads (raise kMaxThreads)");
+    }
+
+    ~ThreadCtx() {
+        // Whatever we could not yet free is handed to the orphan list; some
+        // later thread's maintenance (or flush_all_unsafe) frees it.
+        if (!limbo.empty()) {
+            std::lock_guard<std::mutex> g(dom.orphanMu);
+            for (const Retired& r : limbo) dom.orphans.push_back(r);
+        }
+        if (slotIdx < kMaxThreads) {
+            dom.slots[slotIdx].epoch.store(kIdle, std::memory_order_release);
+            dom.slots[slotIdx].used.store(false, std::memory_order_release);
+        }
+    }
+
+    void maintain() {
+        dom.try_advance();
+        const std::uint64_t e = dom.globalEpoch.load(std::memory_order_acquire);
+        // Free everything retired two or more epochs ago.
+        std::size_t kept = 0;
+        for (std::size_t i = 0; i < limbo.size(); ++i) {
+            if (limbo[i].epoch + 2 <= e) {
+                limbo[i].deleter(limbo[i].ptr);
+            } else {
+                limbo[kept++] = limbo[i];
+            }
+        }
+        limbo.resize(kept);
+        // Opportunistically drain orphans without ever blocking the hot path.
+        if (dom.orphanMu.try_lock()) {
+            std::lock_guard<std::mutex> g(dom.orphanMu, std::adopt_lock);
+            std::size_t okept = 0;
+            for (std::size_t i = 0; i < dom.orphans.size(); ++i) {
+                if (dom.orphans[i].epoch + 2 <= e) {
+                    dom.orphans[i].deleter(dom.orphans[i].ptr);
+                } else {
+                    dom.orphans[okept++] = dom.orphans[i];
+                }
+            }
+            dom.orphans.resize(okept);
+        }
+    }
+};
+
+inline ThreadCtx& tls() {
+    thread_local ThreadCtx ctx;
+    return ctx;
+}
+
+}  // namespace detail
+
+// Pins the current epoch for the duration of one data-structure operation.
+// Nested guards are supported (only the outermost pins/unpins).
+class Guard {
+public:
+    Guard() : ctx_(detail::tls()) {
+        if (ctx_.pinDepth++ == 0) {
+            // seq_cst pin: orders against try_advance's seq_cst scan so a
+            // reclaimer either sees our pin or we see the newer epoch. Pinning
+            // an epoch that just advanced is safe -- merely conservative.
+            const std::uint64_t e = ctx_.dom.globalEpoch.load(std::memory_order_seq_cst);
+            ctx_.dom.slots[ctx_.slotIdx].epoch.store(e, std::memory_order_seq_cst);
+        }
+    }
+    ~Guard() {
+        if (--ctx_.pinDepth == 0)
+            ctx_.dom.slots[ctx_.slotIdx].epoch.store(kIdle, std::memory_order_release);
+    }
+    Guard(const Guard&) = delete;
+    Guard& operator=(const Guard&) = delete;
+
+private:
+    detail::ThreadCtx& ctx_;
+};
+
+// Defer destruction of `p` until it is provably unreachable (epoch + 2).
+template <class T> inline void retire(T* p) {
+    detail::ThreadCtx& ctx = detail::tls();
+    const std::uint64_t e = ctx.dom.globalEpoch.load(std::memory_order_acquire);
+    ctx.limbo.push_back({p, [](void* q) { delete static_cast<T*>(q); }, e});
+    if (++ctx.sinceMaintain >= kRetireThreshold) {
+        ctx.sinceMaintain = 0;
+        ctx.maintain();
+    }
+}
+
+// Free EVERYTHING immediately, ignoring epochs. Only legal when the caller
+// guarantees no thread is concurrently inside any protected operation
+// (e.g. end of a test, after all workers joined). Not part of the normal API.
+inline void flush_all_unsafe() {
+    detail::ThreadCtx& ctx = detail::tls();
+    for (const detail::Retired& r : ctx.limbo) r.deleter(r.ptr);
+    ctx.limbo.clear();
+    std::lock_guard<std::mutex> g(ctx.dom.orphanMu);
+    for (const detail::Retired& r : ctx.dom.orphans) r.deleter(r.ptr);
+    ctx.dom.orphans.clear();
+}
+
+}  // namespace mpmc::ebr
