@@ -1,0 +1,236 @@
+% MPMC queue tradeoffs on asymmetric client silicon -- IEEEtran skeleton.
+% Build: tectonic paper/main.tex   (figures come from scripts/make_plots.py)
+%
+% AUTHORSHIP NOTE (do not delete): drafts in this file are scaffolding produced
+% with AI assistance. Before any submission the human author must verify every
+% claim against paper/notes/claims.md and the data in paper/data/, rewrite the
+% prose in their own voice, and check the venue's AI-disclosure policy.
+\documentclass[conference]{IEEEtran}
+
+\usepackage{graphicx}
+\usepackage{booktabs}
+\usepackage{amsmath}
+\usepackage[hidelinks]{hyperref}
+
+\newcommand{\figtag}{v1} % dataset tag; bump when re-running the matrix
+
+% Placeholder box for figures that have not been generated yet.
+\newcommand{\maybefig}[2]{%
+  \IfFileExists{assets/#1_\figtag.pdf}%
+    {\includegraphics[width=#2]{assets/#1_\figtag.pdf}}%
+    {\fbox{\parbox[c][3.2cm][c]{0.9\linewidth}{\centering placeholder
+      (\texttt{\detokenize{#1}}): run \texttt{scripts/reproduce.sh}}}}}
+
+\begin{document}
+
+\title{MPMC Queue Tradeoffs on Asymmetric Client Silicon:\\
+A Characterization Study on Apple M2}
+
+\author{\IEEEauthorblockN{Dedeepya Avancha}
+\IEEEauthorblockA{Independent / [affiliation]\\
+dedeepyaavancha@gmail.com}}
+
+\maketitle
+
+\begin{abstract}
+Published evaluations of concurrent queue algorithms overwhelmingly report
+results from symmetric x86 server processors with pinned threads and active
+cooling. Client devices violate all three assumptions: cores are asymmetric
+(performance and efficiency clusters), thread placement is delegated to the
+OS (macOS exposes no affinity API on Apple silicon), and passive cooling makes
+sustained load thermally sensitive. We characterize four classic
+multi-producer/multi-consumer queue designs---a mutex-guarded deque, the
+Michael--Scott lock-free queue with epoch-based reclamation, Vyukov's bounded
+CAS queue, and a fetch-and-add ticket queue---plus an industrial reference
+implementation, on an Apple M2 (4 performance + 4 efficiency cores). Our
+experiments vary producer:consumer ratio, QoS-steered core placement, and
+oversubscription, with a coordinated-omission-aware latency methodology and
+thermally interleaved trials. [Headline findings inserted after the k=10 run:
+(1) progress guarantees vs.\ tail latency under preemption; (2) how P/E
+placement reshuffles throughput rankings; (3) where the textbook ranking
+survives.] All results are reproducible with one command from our open
+artifact.
+\end{abstract}
+
+\section{Introduction}
+% Motivation skeleton -- rewrite in author's voice.
+Lock-free queues are folklore-fast: the standard narrative says CAS beats
+locks, FAA beats CAS, and progress guarantees are what you pay for with
+complexity. That narrative was established on server-class symmetric
+multiprocessors with pinned threads. Meanwhile, most code that ships runs on
+client silicon: heterogeneous cores, opaque OS scheduling, passive cooling.
+
+This paper asks a narrow, answerable question: \emph{how much of the textbook
+MPMC-queue tradeoff story survives contact with an asymmetric, unpinnable,
+thermally limited client SoC?} We make no claim of algorithmic novelty; the
+contribution is a careful characterization and a reproducible methodology for
+a measurement environment that prior work treats as out of scope.
+
+Contributions:
+\begin{itemize}
+  \item A four-design comparison (blocking, lock-free node-based, lock-free
+        array CAS, FAA ticket) implemented from the literature in a single
+        harness, validated with ThreadSanitizer and invariant-checking stress
+        tests, plus \texttt{moodycamel::ConcurrentQueue} as an industrial
+        reference.
+  \item A client-silicon methodology: QoS-class core steering (the only
+        sanctioned placement control on macOS), oversubscription as a
+        preemption proxy, coordinated-omission-aware paced latency, process-
+        per-trial isolation, and thermal round-robin interleaving with a
+        per-trial calibration probe on a fanless machine.
+  \item [Findings, filled from data: H1 progress-guarantee tail flip under
+        oversubscription; H2 P/E placement effects; the dedicated-core case
+        where the mutex baseline is competitive or better.]
+\end{itemize}
+
+\section{Background and Related Work}
+\label{sec:background}
+% Condensed from paper/notes/related-work.md; keep citations tight.
+\textbf{Designs.} Michael and Scott's two-lock and non-blocking queues
+\cite{michael1996} anchor the node-based lineage; safe memory reclamation via
+hazard pointers \cite{michael2004} or epochs \cite{fraser2004} is its
+practical tax. Vyukov's bounded MPMC queue \cite{vyukov} popularized per-cell
+sequence coordination. Fetch-and-add designs (LCRQ \cite{morrison2013})
+exploit the observation that FAA scales better than contended CAS; the LMAX
+Disruptor \cite{thompson2011} is the industrial ticket/sequencer ancestor.
+Wait-free constructions \cite{yang2016} complete the progress taxonomy.
+
+\textbf{Methodology.} We follow Hoefler and Belli's guidance on reporting
+parallel-systems measurements \cite{hoefler2015} and Tene's critique of
+latency measurement under coordinated omission \cite{tene}.
+
+\textbf{Gap.} Prior evaluations assume symmetric cores, thread pinning, and
+sustained-load thermal headroom; none of these hold on the devices where most
+software runs. We are not aware of a systematic MPMC queue characterization on
+asymmetric ARM client silicon.
+
+\section{Queue Designs Under Study}
+\label{sec:designs}
+Table~\ref{tab:designs} summarizes the design space along the axes that the
+experiments exercise.
+
+\begin{table}[t]
+\caption{Design space. ``Blocking-on-slot'': a preempted claimant blocks the
+successor of its slot although claiming itself is wait-free.}
+\label{tab:designs}
+\centering
+\small
+\begin{tabular}{@{}lllll@{}}
+\toprule
+Design & Storage & Claim & Progress & Reclaim \\
+\midrule
+mutex+deque & -- & lock & blocking & none \\
+Michael--Scott & nodes & CAS & lock-free & EBR \\
+Vyukov & array & CAS & lock-free & none \\
+FAA ticket & array & FAA & blk-on-slot & none \\
+moodycamel & blocks & mixed & lock-free & internal \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+% One paragraph per design: what it is, the one implementation subtlety that
+% matters for interpretation (EBR stalls under preemption; Vyukov CAS retry;
+% FAA irrevocable tickets), each ~4 sentences. Draft from learn/28.
+
+\section{Methodology}
+\label{sec:method}
+\textbf{Platform.} Apple M2 (MacBook Air, passively cooled), 4 performance +
+4 efficiency cores, macOS; Apple clang 17, \texttt{-O3}; 128-byte cache-line
+padding on all hot atomics.
+
+\textbf{Harness.} One process per trial emits one CSV row; the experiment
+matrix interleaves queues round-robin within each trial round so cross-queue
+comparisons occur under near-identical thermal state. A fixed
+dependent-arithmetic calibration loop is timed before every trial as a
+frequency proxy; its chronological trace (Fig.~\ref{fig:calib}) screens the
+dataset for thermal drift. Trial~0 of each configuration is discarded as
+warmup; we report medians with interquartile ranges over the remaining
+trials \cite{hoefler2015}.
+
+\textbf{Shutdown protocol.} A reserved poison-pill value terminates consumers
+deterministically; this is required for the FAA design, whose irrevocable
+tickets make counter-based termination deadlock-prone.
+
+\textbf{Latency.} Producers are paced against a fixed schedule (total offered
+load split across producers, staggered); the payload carries the
+\emph{scheduled} send time, so producer lateness is charged to the reported
+tail rather than silently omitted \cite{tene}.
+
+\textbf{Placement and preemption.} macOS exposes no thread affinity on Apple
+silicon; we steer placement with thread QoS classes
+(\texttt{USER\_INTERACTIVE} biases performance cores,
+\texttt{BACKGROUND} efficiency cores) and treat the result as a bias, not an
+assignment. Oversubscription (thread count multiplied at fixed ratio) serves
+as a controlled preemption generator.
+
+\section{Results}
+\label{sec:results}
+% Every claim here must have a row in paper/notes/claims.md with data behind
+% it. Numbers below are inserted from paper/data/summary_v1.md (k=5 triage)
+% and finalized from the k=10 run.
+
+\subsection{Throughput across producer:consumer ratios}
+\begin{figure}[t]\centering
+\maybefig{fig_throughput_ratio}{\linewidth}
+\caption{Median throughput by P:C ratio, dedicated cores, default QoS.
+Error bars: IQR.}
+\label{fig:ratio}
+\end{figure}
+[Draft after data: where the mutex baseline sits; FAA vs CAS ordering; the
+SPSC 1:1 reference point as the generality tax.]
+
+\subsection{Oversubscription: progress guarantees under preemption (H1)}
+\begin{figure}[t]\centering
+\maybefig{fig_oversubscription}{0.9\linewidth}
+\caption{Throughput at 4P:4C as threads are multiplied beyond cores
+(log--log). }
+\label{fig:oversub}
+\end{figure}
+
+\begin{figure}[t]\centering
+\maybefig{fig_latency_tail}{\linewidth}
+\caption{Paced-load latency percentiles, dedicated (left) vs.\ 4$\times$
+oversubscribed (right), log scale.}
+\label{fig:tail}
+\end{figure}
+[Draft after data: does the blocking-on-slot FAA design lose its dedicated-core
+advantage under preemption, and by how much at p99.9?]
+
+\subsection{Core placement via QoS (H2)}
+\begin{figure}[t]\centering
+\maybefig{fig_qos}{\linewidth}
+\caption{Throughput at 4P:4C under QoS placement policies.}
+\label{fig:qos}
+\end{figure}
+[Draft after data: E-core penalty per design; asymmetric producer/consumer
+placements.]
+
+\subsection{Thermal validity}
+\begin{figure}[t]\centering
+\maybefig{fig_calib}{\linewidth}
+\caption{Calibration-probe trace across the full matrix (thermal screen).}
+\label{fig:calib}
+\end{figure}
+
+\section{Threats to Validity}
+\label{sec:threats}
+Single machine and OS (stated scope: client characterization, not a general
+ranking); QoS placement is a scheduler bias, not pinning -- we report policies,
+not measured per-sample core residency; our implementations are faithful but
+not micro-optimized to each design's best known form (the industrial reference
+arm bounds this gap); Apple silicon's memory subsystem details are not
+publicly documented, so microarchitectural attribution is necessarily
+inferential.
+
+\section{Conclusion}
+[One paragraph, written last, matching only what the data supports.]
+
+\section*{Artifact}
+All code, data, and figure pipelines:
+\url{https://github.com/Dd1235/SPSC_Queue}. \texttt{scripts/reproduce.sh}
+rebuilds the dataset and every figure in this paper.
+
+\bibliographystyle{IEEEtran}
+\bibliography{refs}
+
+\end{document}
