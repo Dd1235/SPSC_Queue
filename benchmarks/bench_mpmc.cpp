@@ -45,6 +45,8 @@
 #include <pthread/qos.h>
 #endif
 
+#include <sys/resource.h>
+
 #include <algorithm>
 #include <atomic>
 #include <cinttypes>
@@ -137,6 +139,7 @@ struct Result {
     std::uint64_t p50 = 0, p99 = 0, p999 = 0, mx = 0;
     double fair_cov = 0;  // CoV of per-producer push counts (throughput mode)
     std::uint64_t calib_ns = 0;
+    double peak_rss_mb = 0;  // process peak RSS (H3: unbounded MS memory growth)
 };
 
 void apply_qos(const std::string& policy, bool isProducer) {
@@ -160,21 +163,44 @@ void apply_qos(const std::string& policy, bool isProducer) {
 }
 
 // Fixed dependent-work loop, timed: a cheap frequency proxy so the matrix
-// script can detect thermal drift between trials (fanless M2).
+// script can detect thermal drift between trials (fanless M2). Pinned to
+// USER_INTERACTIVE QoS so the probe measures P-core frequency, not scheduler
+// placement luck (matrix v1's 97-172 ms spread was placement-confounded; see
+// paper/notes/claims.md caveat C1).
 std::uint64_t spin_calibration() {
+#ifdef __APPLE__
+    pthread_set_qos_class_self_np(QOS_CLASS_USER_INTERACTIVE, 0);
+#endif
     volatile std::uint64_t acc = 1;
     const auto t0 = bench::Clock::now();
     for (int i = 0; i < 50'000'000; ++i)
         acc = acc * 6364136223846793005ull + 1442695040888963407ull;
-    return static_cast<std::uint64_t>(
+    const auto ns = static_cast<std::uint64_t>(
         std::chrono::duration_cast<std::chrono::nanoseconds>(bench::Clock::now() - t0)
             .count());
+#ifdef __APPLE__
+    // Workers inherit the spawning thread's QoS: restore DEFAULT so the probe's
+    // pin does not silently turn the "none" policy into all-interactive.
+    pthread_set_qos_class_self_np(QOS_CLASS_DEFAULT, 0);
+#endif
+    return ns;
 }
 
 std::uint64_t now_ns() {
     return static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(
                                           bench::Clock::now().time_since_epoch())
                                           .count());
+}
+
+// Peak resident set size in MB (macOS reports ru_maxrss in bytes, Linux in KB).
+double peak_rss_mb() {
+    rusage ru{};
+    getrusage(RUSAGE_SELF, &ru);
+#ifdef __APPLE__
+    return static_cast<double>(ru.ru_maxrss) / (1024.0 * 1024.0);
+#else
+    return static_cast<double>(ru.ru_maxrss) / 1024.0;
+#endif
 }
 
 // ---------------- the two measurement modes ----------------
@@ -325,14 +351,15 @@ void write_csv(const Config& cfg, const Result& r) {
     if (std::ftell(f) == 0)
         std::fprintf(f, "queue,mode,producers,consumers,oversubscribe,capacity,qos,seconds,"
                         "rate,trial,ops,elapsed_s,throughput_mops,mean_ns,p50_ns,p99_ns,"
-                        "p999_ns,max_ns,fair_cov,calib_ns,unix_time\n");
+                        "p999_ns,max_ns,fair_cov,calib_ns,peak_rss_mb,unix_time\n");
     std::fprintf(f,
                  "%s,%s,%d,%d,%d,%zu,%s,%.2f,%.0f,%d,%" PRIu64 ",%.4f,%.3f,%.1f,%" PRIu64
-                 ",%" PRIu64 ",%" PRIu64 ",%" PRIu64 ",%.4f,%" PRIu64 ",%ld\n",
+                 ",%" PRIu64 ",%" PRIu64 ",%" PRIu64 ",%.4f,%" PRIu64 ",%.1f,%ld\n",
                  cfg.queue.c_str(), cfg.mode.c_str(), cfg.producers, cfg.consumers,
                  cfg.oversubscribe, cfg.capacity, cfg.qos.c_str(), cfg.seconds, cfg.rate,
                  cfg.trial, r.ops, r.elapsed, r.ops / r.elapsed / 1e6, r.mean_ns, r.p50, r.p99,
-                 r.p999, r.mx, r.fair_cov, r.calib_ns, static_cast<long>(std::time(nullptr)));
+                 r.p999, r.mx, r.fair_cov, r.calib_ns, r.peak_rss_mb,
+                 static_cast<long>(std::time(nullptr)));
     std::fclose(f);
 }
 
@@ -402,6 +429,7 @@ int main(int argc, char** argv) {
         return 2;
     }
     r.calib_ns = calib;
+    r.peak_rss_mb = peak_rss_mb();
 
     if (cfg.queue == "ms") mpmc::ebr::flush_all_unsafe();
 
