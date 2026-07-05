@@ -22,3 +22,4 @@ out/
 .vscode/
 .idea/
 compile_commands.json
+paper/main.pdf
