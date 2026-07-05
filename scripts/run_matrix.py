@@ -45,6 +45,12 @@ def shapes(smoke: bool):
     # -- throughput: QoS placement at 4x4 (H2 axis; 'none' covered above)
     for q in (["all-int", "all-bg", "prod-bg", "cons-bg"] if not smoke else ["all-bg"]):
         yield dict(mode="throughput", producers=4, consumers=4, oversubscribe=1, qos=q)
+    # -- throughput: capacity sensitivity at the H1 shape (bounds the pipelining
+    #    explanation of FAA's oversubscription gain; 1024 covered above)
+    if not smoke:
+        for cap in [64, 8192]:
+            yield dict(mode="throughput", producers=4, consumers=4, oversubscribe=4,
+                       qos="none", capacity=cap)
     # -- latency: paced 1 M msg/s total; dedicated vs oversubscribed (H1 tails)
     lat = [(1, 1, 1), (4, 4, 1), (4, 4, 4)] if not smoke else [(4, 4, 4)]
     for p, c, f in lat:
@@ -67,7 +73,7 @@ def run_one(bench, shape, queue, trial, seconds, out, timeout):
            "--qos", shape["qos"],
            "--mode", shape["mode"],
            "--seconds", str(seconds),
-           "--capacity", "1024",
+           "--capacity", str(shape.get("capacity", 1024)),
            "--trial", str(trial),
            "--csv", str(out)]
     if "rate" in shape:
