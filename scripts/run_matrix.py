@@ -28,11 +28,29 @@ import sys
 import time
 from pathlib import Path
 
-QUEUES = ["ms", "vyukov", "faa", "mutex", "moody"]  # spsc added for 1:1 shapes
+QUEUES = ["ms", "vyukov", "vyukov-b", "faa", "casticket", "mutex", "moody"]  # +spsc at 1:1
 
 
-def shapes(smoke: bool):
+def shapes(smoke: bool, focus: str = ""):
     """Yield dicts of shape parameters (everything except queue + trial)."""
+    if focus == "h1":
+        # The F1-attribution subset: oversubscription sweep + capacity control +
+        # the 1:1/2:2 cliff + P/E extremes + paced tails. ~8 arms x 12 shapes.
+        for f in (1, 2, 4):
+            yield dict(mode="throughput", producers=4, consumers=4, oversubscribe=f,
+                       qos="none")
+        for cap in (64, 8192):
+            yield dict(mode="throughput", producers=4, consumers=4, oversubscribe=4,
+                       qos="none", capacity=cap)
+        for p, c in ((1, 1), (2, 2)):
+            yield dict(mode="throughput", producers=p, consumers=c, oversubscribe=1,
+                       qos="none")
+        for q in ("all-int", "all-bg"):
+            yield dict(mode="throughput", producers=4, consumers=4, oversubscribe=1, qos=q)
+        for f in (1, 4):
+            yield dict(mode="latency", producers=4, consumers=4, oversubscribe=f,
+                       qos="none", rate=1_000_000)
+        return
     ratios = [(1, 1), (2, 2), (4, 4), (1, 7), (7, 1), (2, 6), (6, 2)]
     if smoke:
         ratios = [(1, 1), (4, 4)]
@@ -100,6 +118,8 @@ def main():
     ap.add_argument("--timeout", type=float, default=120.0)
     ap.add_argument("--queues", default=",".join(QUEUES))
     ap.add_argument("--smoke", action="store_true", help="tiny matrix for pipeline testing")
+    ap.add_argument("--focus", default="", choices=["", "h1"],
+                    help="named shape subset (h1 = F1-attribution set)")
     args = ap.parse_args()
 
     bench = Path(args.bench)
@@ -117,7 +137,7 @@ def main():
         print("note: binary lacks moodycamel support; dropping 'moody' arm", flush=True)
         queues.remove("moody")
 
-    shape_list = list(shapes(args.smoke))
+    shape_list = list(shapes(args.smoke, args.focus))
     total = sum(len(queues_for(s, queues)) for s in shape_list) * args.trials
     print(f"matrix: {len(shape_list)} shapes x queues x {args.trials} trials = {total} runs",
           flush=True)

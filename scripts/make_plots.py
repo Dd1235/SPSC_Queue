@@ -23,23 +23,31 @@ import matplotlib.pyplot as plt
 import pandas as pd
 
 # Fixed entity colors (validated 6-slot categorical palette; CVD-safe order).
+# Control variants wear their parent's hue restyled (hatch/dash), never a new
+# hue: color follows the entity family (dataviz rule -- no 7th/8th hues).
 COLOR = {
-    "ms": "#2a78d6",      # blue
-    "vyukov": "#1baf7a",  # aqua
-    "faa": "#eda100",     # yellow
-    "spsc": "#008300",    # green
-    "moody": "#4a3aa7",   # violet
-    "mutex": "#e34948",   # red
+    "ms": "#2a78d6",         # blue
+    "vyukov": "#1baf7a",     # aqua
+    "vyukov-b": "#1baf7a",   # aqua (variant of vyukov)
+    "faa": "#eda100",        # yellow
+    "casticket": "#eda100",  # yellow (variant of faa)
+    "spsc": "#008300",       # green
+    "moody": "#4a3aa7",      # violet
+    "mutex": "#e34948",      # red
 }
 LABEL = {
     "ms": "Michael–Scott (EBR)",
     "vyukov": "Vyukov",
+    "vyukov-b": "Vyukov+backoff",
     "faa": "FAA/ticket",
+    "casticket": "CAS/ticket",
     "mutex": "mutex+deque",
     "moody": "moodycamel CQ",
     "spsc": "SPSC (1:1 only)",
 }
-ORDER = ["ms", "vyukov", "faa", "moody", "mutex", "spsc"]
+HATCH = {"vyukov-b": "//", "casticket": "//"}   # bar variant marker
+DASH = {"vyukov-b": (4, 2), "casticket": (4, 2)}  # line variant marker
+ORDER = ["ms", "vyukov", "vyukov-b", "faa", "casticket", "moody", "mutex", "spsc"]
 
 plt.rcParams.update({
     "font.size": 8.5,
@@ -83,7 +91,7 @@ def grouped_bars(ax, sub, xcats, xkey, ykey="median", ylabel="", logy=False):
                 lo.append(r["median"] - r["q1"])
                 hi.append(r["q3"] - r["median"])
         ax.bar(xs, ys, width * 0.92, color=COLOR[q], label=LABEL[q],
-               edgecolor="white", linewidth=0.6)
+               edgecolor="white", linewidth=0.6, hatch=HATCH.get(q, None))
         ax.errorbar(xs, ys, yerr=[lo, hi], fmt="none", ecolor="#444", elinewidth=0.7,
                     capsize=1.5)
     ax.set_xticks(range(len(xcats)))
@@ -118,7 +126,9 @@ def fig_oversubscription(df, outdir, tag):
         ax.errorbar(rows.oversubscribe, rows["median"],
                     yerr=[rows["median"] - rows.q1, rows.q3 - rows["median"]],
                     color=COLOR[q], label=LABEL[q], marker="o", markersize=3.5,
-                    linewidth=1.6, capsize=1.5)
+                    linewidth=1.6, capsize=1.5,
+                    dashes=DASH.get(q, (None, None)) if q in DASH else (None, None),
+                    linestyle="--" if q in DASH else "-")
     ax.set_xscale("log", base=2)
     ax.set_xticks([1, 2, 4])
     ax.set_xticklabels(["x1\n(8 thr)", "x2\n(16 thr)", "x4\n(32 thr)"])
@@ -193,6 +203,63 @@ def fig_calib(df, outdir, tag):
     plt.close(fig)
 
 
+def fig_fairness(df, outdir, tag):
+    """Producer & consumer fairness (CoV of per-thread op counts), 4P:4C."""
+    base = df[(df["mode"] == "throughput") & (df.producers == 4) & (df.consumers == 4) &
+              (df.qos == "none") & (df.capacity == 1024)]
+    fig, axes = plt.subplots(1, 2, figsize=(6.8, 2.6), sharey=True)
+    for ax, col, title in zip(axes, ["fair_cov", "cons_cov"],
+                              ["producer-side", "consumer-side"]):
+        sub = agg(base, col)
+        cats = [1, 4]
+        sub = sub[sub.oversubscribe.isin(cats)]
+        grouped_bars(ax, sub, cats, "oversubscribe",
+                     ylabel="CoV of per-thread ops" if col == "fair_cov" else "")
+        ax.set_xticklabels(["x1", "x4"])
+        ax.set_title(title, fontsize=8.5)
+        ax.set_xlabel("oversubscription")
+    axes[0].legend(ncol=2, fontsize=6, frameon=False)
+    fig.tight_layout()
+    for ext in ("pdf", "png"):
+        fig.savefig(outdir / f"fig_fairness_{tag}.{ext}")
+    plt.close(fig)
+
+
+def fig_mechanism(df, outdir, tag):
+    """Stats-build dataset: retries/op (log) and involuntary csw vs oversub."""
+    base = df[(df["mode"] == "throughput") & (df.producers == 4) & (df.consumers == 4) &
+              (df.qos == "none") & (df.capacity == 1024)]
+    fig, axes = plt.subplots(1, 2, figsize=(6.8, 2.6))
+    for q in queues_present(base):
+        rows = agg(base[base.queue == q], "retries_per_op").sort_values("oversubscribe")
+        if rows["median"].max() > 0:
+            axes[0].plot(rows.oversubscribe, rows["median"].clip(lower=1e-3),
+                         color=COLOR[q], label=LABEL[q], marker="o", markersize=3,
+                         linestyle="--" if q in DASH else "-", linewidth=1.5)
+    axes[0].set_yscale("log")
+    axes[0].set_xscale("log", base=2)
+    axes[0].set_xticks([1, 2, 4]); axes[0].set_xticklabels(["x1", "x2", "x4"])
+    axes[0].set_ylabel("retries per op (log)")
+    axes[0].set_xlabel("oversubscription")
+    axes[0].set_title("claim/CAS retries", fontsize=8.5)
+    axes[0].legend(fontsize=5.5, frameon=False)
+    for q in queues_present(base):
+        rows = agg(base[base.queue == q], "ivcsw").sort_values("oversubscribe")
+        axes[1].plot(rows.oversubscribe, rows["median"].clip(lower=1),
+                     color=COLOR[q], marker="o", markersize=3,
+                     linestyle="--" if q in DASH else "-", linewidth=1.5)
+    axes[1].set_yscale("log")
+    axes[1].set_xscale("log", base=2)
+    axes[1].set_xticks([1, 2, 4]); axes[1].set_xticklabels(["x1", "x2", "x4"])
+    axes[1].set_ylabel("involuntary ctx switches (log)")
+    axes[1].set_xlabel("oversubscription")
+    axes[1].set_title("preemptions per trial", fontsize=8.5)
+    fig.tight_layout()
+    for ext in ("pdf", "png"):
+        fig.savefig(outdir / f"fig_mechanism_{tag}.{ext}")
+    plt.close(fig)
+
+
 def md_table(piv):
     """Markdown-render a pivot table without the optional tabulate dependency."""
     cols = list(piv.columns)
@@ -248,6 +315,10 @@ def main():
     fig_latency_tail(df, assets, args.tag)
     fig_qos(df, assets, args.tag)
     fig_calib(df, assets, args.tag)
+    if "cons_cov" in df.columns:
+        fig_fairness(df, assets, args.tag)
+    if "retries_per_op" in df.columns and df.retries_per_op.max() > 0:
+        fig_mechanism(df, assets, args.tag)
     write_summary(df, data_dir, args.tag)
     print(f"figures -> {assets}/fig_*_{args.tag}.(pdf|png); summary -> "
           f"{data_dir}/summary_{args.tag}.md")
