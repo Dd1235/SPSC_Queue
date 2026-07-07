@@ -18,6 +18,13 @@ add_bench(bench_latency)
 # The MPMC study's measurement binary (scripts/run_matrix.py drives it).
 add_bench(bench_mpmc)
 
+# Instrumented twin: same source with mechanism counters compiled in. Used for
+# the mechanism dataset only, never for headline numbers (perturbation).
+add_executable(bench_mpmc_stats bench_mpmc.cpp)
+target_link_libraries(bench_mpmc_stats PRIVATE spsc::queue Threads::Threads)
+target_compile_options(bench_mpmc_stats PRIVATE -O3 -Wall -Wextra)
+target_compile_definitions(bench_mpmc_stats PRIVATE SPSC_QUEUE_STATS)
+
 # Head-to-head against the reference SPSC implementations. Off by default so
 # the normal build needs no network; turn on with -DSPSC_BENCH_THIRDPARTY=ON.
 option(SPSC_BENCH_THIRDPARTY "Fetch rigtorp/moodycamel and build bench_vs_libs" OFF)
@@ -41,7 +48,9 @@ if(SPSC_BENCH_THIRDPARTY)
         ${rigtorp_spsc_SOURCE_DIR}/include
         ${moodycamel_rwq_SOURCE_DIR})
 
-    # bench_mpmc gains the moodycamel::ConcurrentQueue reference arm.
+    # bench_mpmc (and its stats twin) gain the moodycamel reference arm.
     target_compile_definitions(bench_mpmc PRIVATE SPSC_HAVE_MOODYCAMEL)
     target_include_directories(bench_mpmc PRIVATE ${moodycamel_cq_SOURCE_DIR})
+    target_compile_definitions(bench_mpmc_stats PRIVATE SPSC_HAVE_MOODYCAMEL)
+    target_include_directories(bench_mpmc_stats PRIVATE ${moodycamel_cq_SOURCE_DIR})
 endif()
