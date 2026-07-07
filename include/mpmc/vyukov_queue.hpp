@@ -94,6 +94,23 @@ public:
 
     std::size_t capacity() const noexcept { return n_; }  // effective (rounded up)
 
+    // Mechanism counters (F1 attribution): compiled only with SPSC_QUEUE_STATS.
+    // primary = cursor CAS failures; secondary = behind-the-cursor re-reads.
+    std::uint64_t stat_retries() const noexcept {
+#ifdef SPSC_QUEUE_STATS
+        return statRetries_.load(std::memory_order_relaxed);
+#else
+        return 0;
+#endif
+    }
+    std::uint64_t stat_secondary() const noexcept {
+#ifdef SPSC_QUEUE_STATS
+        return statSecondary_.load(std::memory_order_relaxed);
+#else
+        return 0;
+#endif
+    }
+
     bool try_push(const T& v) { return emplace_impl(v); }
     bool try_push(T&& v) { return emplace_impl(std::move(v)); }
 
@@ -117,11 +134,13 @@ public:
                     return true;
                 }
                 // CAS failed: `pos` was refreshed by compare_exchange; retry.
+                count_retry();
                 be.lost_a_round();
             } else if (dif < 0) {
                 return false;  // cell not yet produced -> queue empty at our pos
             } else {
                 pos = dequeuePos_.load(std::memory_order_relaxed);  // we're behind
+                count_behind();
                 be.lost_a_round();
             }
         }
@@ -145,15 +164,32 @@ private:
                     c.seq.store(pos + 1, std::memory_order_release);
                     return true;
                 }
+                count_retry();
                 be.lost_a_round();  // CAS lost
             } else if (dif < 0) {
                 return false;  // cell still holds last lap's data -> full
             } else {
                 pos = enqueuePos_.load(std::memory_order_relaxed);
+                count_behind();
                 be.lost_a_round();
             }
         }
     }
+
+    void count_retry() noexcept {
+#ifdef SPSC_QUEUE_STATS
+        statRetries_.fetch_add(1, std::memory_order_relaxed);
+#endif
+    }
+    void count_behind() noexcept {
+#ifdef SPSC_QUEUE_STATS
+        statSecondary_.fetch_add(1, std::memory_order_relaxed);
+#endif
+    }
+#ifdef SPSC_QUEUE_STATS
+    std::atomic<std::uint64_t> statRetries_{0};
+    std::atomic<std::uint64_t> statSecondary_{0};
+#endif
 
     std::size_t n_;
     std::size_t mask_;

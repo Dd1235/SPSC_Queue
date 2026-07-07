@@ -53,11 +53,12 @@ template <class T, bool CasClaim = false> class FAAQueue {
         return p;
     }
 
-    static void wait_for(std::atomic<std::size_t>& turn, std::size_t want) {
+    void wait_for(std::atomic<std::size_t>& turn, std::size_t want) {
         int spins = 0;
         while (turn.load(std::memory_order_acquire) != want) {
             if (++spins >= 1024) {  // be polite once it's clearly not imminent
                 std::this_thread::yield();
+                count_yield();
                 spins = 0;
             }
         }
@@ -65,13 +66,14 @@ template <class T, bool CasClaim = false> class FAAQueue {
 
     // The claim primitive under test. fetch_add always succeeds in one RMW;
     // the CAS variant can lose and retry -- that difference is the experiment.
-    static std::size_t take_ticket(std::atomic<std::size_t>& counter) {
+    std::size_t take_ticket(std::atomic<std::size_t>& counter) {
         if constexpr (CasClaim) {
             std::size_t t = counter.load(std::memory_order_relaxed);
             while (!counter.compare_exchange_weak(t, t + 1, std::memory_order_relaxed)) {
                 // t was reloaded by the failed CAS; retry immediately (no
                 // backoff -- mirrors Vyukov's raw retry so the comparison is
                 // claim-primitive-only).
+                count_retry();
             }
             return t;
         } else {
@@ -102,6 +104,24 @@ public:
 
     std::size_t capacity() const noexcept { return n_; }
 
+    // Mechanism counters (SPSC_QUEUE_STATS builds only):
+    // primary = claim CAS failures (always 0 for the pure-FAA variant);
+    // secondary = slot-wait yields (quanta handed back while blocked-on-slot).
+    std::uint64_t stat_retries() const noexcept {
+#ifdef SPSC_QUEUE_STATS
+        return statRetries_.load(std::memory_order_relaxed);
+#else
+        return 0;
+#endif
+    }
+    std::uint64_t stat_secondary() const noexcept {
+#ifdef SPSC_QUEUE_STATS
+        return statSecondary_.load(std::memory_order_relaxed);
+#else
+        return 0;
+#endif
+    }
+
     // Any thread. Blocks (spin+yield) while the queue is full.
     void push(const T& v) { emplace_impl(v); }
     void push(T&& v) { emplace_impl(std::move(v)); }
@@ -126,6 +146,21 @@ private:
         ::new (c.storage) T(std::forward<U>(v));
         c.turn.store(2 * round + 1, std::memory_order_release);  // reader's turn
     }
+
+    void count_retry() noexcept {
+#ifdef SPSC_QUEUE_STATS
+        statRetries_.fetch_add(1, std::memory_order_relaxed);
+#endif
+    }
+    void count_yield() noexcept {
+#ifdef SPSC_QUEUE_STATS
+        statSecondary_.fetch_add(1, std::memory_order_relaxed);
+#endif
+    }
+#ifdef SPSC_QUEUE_STATS
+    std::atomic<std::uint64_t> statRetries_{0};
+    std::atomic<std::uint64_t> statSecondary_{0};
+#endif
 
     static std::size_t log2_(std::size_t p) {
         std::size_t s = 0;

@@ -23,6 +23,7 @@
 
 #include <atomic>
 #include <cstddef>
+#include <cstdint>
 #include <new>
 #include <type_traits>
 #include <utility>
@@ -69,6 +70,23 @@ public:
     MSQueue(const MSQueue&) = delete;
     MSQueue& operator=(const MSQueue&) = delete;
 
+    // Mechanism counters (SPSC_QUEUE_STATS builds only):
+    // primary = CAS failures (link + head); secondary = tail-lag helps.
+    std::uint64_t stat_retries() const noexcept {
+#ifdef SPSC_QUEUE_STATS
+        return statRetries_.load(std::memory_order_relaxed);
+#else
+        return 0;
+#endif
+    }
+    std::uint64_t stat_secondary() const noexcept {
+#ifdef SPSC_QUEUE_STATS
+        return statSecondary_.load(std::memory_order_relaxed);
+#else
+        return 0;
+#endif
+    }
+
     // Any thread. Always succeeds (unbounded); bool for interface parity.
     bool try_push(const T& v) {
         Node* n = new Node(v);
@@ -86,10 +104,12 @@ public:
                                                   std::memory_order_relaxed);
                     return true;
                 }
+                count_retry();
             } else {
                 // Tail lagging behind the real last node: help it forward.
                 tail_.compare_exchange_strong(t, next, std::memory_order_release,
                                               std::memory_order_relaxed);
+                count_help();
             }
         }
     }
@@ -118,11 +138,27 @@ public:
                     ebr::retire(h);  // old dummy; freed >= 2 epochs from now
                     return true;
                 }
+                count_retry();
             }
         }
     }
 
 private:
+    void count_retry() noexcept {
+#ifdef SPSC_QUEUE_STATS
+        statRetries_.fetch_add(1, std::memory_order_relaxed);
+#endif
+    }
+    void count_help() noexcept {
+#ifdef SPSC_QUEUE_STATS
+        statSecondary_.fetch_add(1, std::memory_order_relaxed);
+#endif
+    }
+#ifdef SPSC_QUEUE_STATS
+    std::atomic<std::uint64_t> statRetries_{0};
+    std::atomic<std::uint64_t> statSecondary_{0};
+#endif
+
     alignas(128) std::atomic<Node*> head_;  // consumers CAS
     alignas(128) std::atomic<Node*> tail_;  // producers CAS (+ helpers)
     char pad_[128 - sizeof(std::atomic<Node*>)];
