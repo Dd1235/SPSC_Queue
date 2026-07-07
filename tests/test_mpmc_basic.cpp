@@ -136,6 +136,8 @@ int main() {
 
     test_fifo_and_empty<mpmc::VyukovQueue<int>>();
     test_interleaved<mpmc::VyukovQueue<int>>();
+    test_fifo_and_empty<mpmc::VyukovQueue<int, true>>();  // backoff variant
+    test_interleaved<mpmc::VyukovQueue<int, true>>();
     test_vyukov_bounded();
     test_vyukov_lifetime();
 

@@ -77,10 +77,11 @@ static bool run_stress(int producers, int consumers, std::uint64_t perProducer,
 // a shared counter (two consumers could both pass the check and one would
 // block forever on a pop that never comes). One pill per consumer, pushed
 // after all producers have joined. Same three invariants as run_stress.
-static bool run_stress_faa(int producers, int consumers, std::uint64_t perProducer,
-                           std::size_t capacity) {
+template <class Q>
+static bool run_stress_blocking(int producers, int consumers, std::uint64_t perProducer,
+                                std::size_t capacity) {
     constexpr std::uint64_t kPoison = ~0ull;
-    mpmc::FAAQueue<std::uint64_t> q(capacity);
+    Q q(capacity);
     const std::uint64_t total = static_cast<std::uint64_t>(producers) * perProducer;
 
     std::unique_ptr<std::atomic<std::uint32_t>[]> marks(
@@ -142,11 +143,21 @@ int main() {
     CHECK((run_stress<VY>(7, 1, 20'000, 64)));
     CHECK((run_stress<VY>(1, 7, 120'000, 1024)));
 
-    // FAA ticket queue via the poison-pill runner.
-    CHECK(run_stress_faa(2, 2, 60'000, 1024));
-    CHECK(run_stress_faa(4, 4, 30'000, 64));
-    CHECK(run_stress_faa(7, 1, 20'000, 64));
-    CHECK(run_stress_faa(1, 7, 120'000, 1024));
+    // FAA ticket queue (and its CAS-claim control variant) via the
+    // poison-pill runner.
+    using FA = mpmc::FAAQueue<std::uint64_t, false>;
+    using CT = mpmc::FAAQueue<std::uint64_t, true>;
+    CHECK((run_stress_blocking<FA>(2, 2, 60'000, 1024)));
+    CHECK((run_stress_blocking<FA>(4, 4, 30'000, 64)));
+    CHECK((run_stress_blocking<FA>(7, 1, 20'000, 64)));
+    CHECK((run_stress_blocking<FA>(1, 7, 120'000, 1024)));
+    CHECK((run_stress_blocking<CT>(4, 4, 30'000, 64)));
+    CHECK((run_stress_blocking<CT>(2, 2, 60'000, 1024)));
+
+    // Vyukov backoff control variant through the try-based runner.
+    using VB = mpmc::VyukovQueue<std::uint64_t, true>;
+    CHECK((run_stress<VB>(4, 4, 30'000, 64)));
+    CHECK((run_stress<VB>(2, 2, 60'000, 1024)));
 
     mpmc::ebr::flush_all_unsafe();
     return TEST_SUMMARY();
