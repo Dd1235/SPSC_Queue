@@ -18,7 +18,7 @@ Nothing enters main.tex without a row here. Status: HYPOTHESIS → MEASURED
 
 | # | Finding | Numbers (medians) | Status |
 |---|---------|-------------------|--------|
-| **F1** | **H1 inverted: wait-free CLAIMING beats lock-free RETRY under preemption.** Vyukov (lock-free CAS) collapses under oversubscription while the blocking-on-slot FAA queue *improves* and posts the best tail by 3–6×. Mechanism hypothesis: preempted CAS losers burn scheduler quanta re-fighting for the cursor line across 32 threads, while FAA's fetch_add always succeeds and its spin-then-yield slot waits hand quanta back. Naively applied, the progress-guarantee taxonomy mispredicts this platform. | 4P:4C throughput ×1→×4: FAA 16.0→31.2 (+94%), Vyukov 8.6→1.5 (−83%), mutex 19.7→14.7, MS 7.3→5.4. p99.9 @×4: FAA 18 ms vs Vyukov 59 / mutex 72 / MS 81 / moody 116 ms | MEASURED (k=10 + capacity-sensitivity check required before VERIFIED — the FAA *increase* is surprising enough to demand re-verification) |
+| **F1** | **H1 inverted, capacity-mediated: wait-free CLAIMING beats lock-free RETRY under preemption — given queue capacity to absorb scheduling gaps.** Vyukov (lock-free CAS) collapses under oversubscription while the blocking-on-slot FAA queue *improves* and posts the best tail by 3–6×. Mechanism hypothesis: preempted CAS losers burn scheduler quanta re-fighting for the cursor line across 32 threads, while FAA's fetch_add always succeeds and its spin-then-yield slot waits hand quanta back. Naively applied, the progress-guarantee taxonomy mispredicts this platform. | 4P:4C throughput ×1→×4: FAA 16.0→31.2 (+94%), Vyukov 8.6→1.5 (−83%), mutex 19.7→14.7, MS 7.3→5.4. p99.9 @×4: FAA 18 ms vs Vyukov 59 / mutex 72 / MS 81 / moody 116 ms | **VERIFIED** (v2, k=8: throughput replicates within ~6%; FAA 16.5→29.2, Vyukov 7.8→1.7. Capacity control REFINES it: at cap 64 FAA collapses to 2.57 — blocking-on-slot re-emerges exactly as originally predicted when slack vanishes; at cap 8192 FAA 20.4, non-monotone. State F1 as capacity-conditional.) |
 | **F2** | **E-core placement reorders the ranking; FAA is placement-immune.** all-int → all-bg: FAA 16.2→15.6 (−4%), mutex 19.8→2.65 (−87%), Vyukov 8.6→0.53 (−94%), moody 8.2→1.8, MS 7.2→2.8. On E-cores FAA is ~6× the mutex and ~30× Vyukov. | qos table appended below | MEASURED |
 | **F3** | **On dedicated cores at moderate mixed ratios the mutex baseline beats every lock-free MPMC design** (4:4: mutex 19.7 vs FAA 16.0, Vyukov 8.6, moody 7.9, MS 7.3). Lock-free wins only at 1:1 (FAA 123, Vyukov 117, mutex 32) and producer-heavy 7:1. "Lock-free is faster" is a 1:1 artifact here. | summary_v1.md ratio table | MEASURED |
 | **F4** | SPSC 1:1 baseline (361 Mops/s) ≈ 3× the best MPMC at 1:1 (FAA 123) — the measured price of MPMC generality on this SoC. | summary_v1.md | MEASURED |
@@ -30,10 +30,34 @@ loop runs on the fresh process's main thread with *default* QoS, so some of the
 Phase F: pin calibration to USER_INTERACTIVE; until then, do not cite calib
 drift as purely thermal.
 
-**Phase F follow-ups:** (1) k=10 run → VERIFIED statuses; (2) FAA capacity
-sensitivity (64/1024/8192) to bound the pipelining explanation of its
-oversubscription gain; (3) calib QoS pin (C1); (4) per-run RSS sampling to
-instrument H3's memory-growth axis.
+**Caveat C2 (launcher QoS inheritance — v1 latency absolutes are confounded):**
+v2's explicit `QOS_CLASS_DEFAULT` reset after calibration lifted worker threads
+out of QoS inherited from the background launcher shell. Result: dedicated-core
+p99.9 dropped 10–30x (v1: 7–10 ms; v2: 0.27–0.66 ms). v1 cross-queue
+*comparisons* stay valid (all arms equally penalized, interleaved), but **all
+absolute latency numbers cite v2 only**. Paper methodology gets a paragraph:
+"on macOS, worker QoS silently inherits from the launcher; reset it explicitly."
+
+**H3 CONFIRMED with mechanism (v2 RSS column):** MS peak RSS 376 MB (1:1),
+742 MB (1:7), 680 MB (2:6) in 2-second runs vs 1–2 MB for every bounded queue.
+The asymmetry (7 MB at 7:1 vs 742 MB at 1:7) localizes the mechanism: EBR epoch
+advancement requires every pinned thread to sit at the current epoch, so
+reclamation starves as the count of concurrently pinned consumers grows.
+Unboundedness converts back-pressure into memory growth, and EBR converts
+consumer parallelism into reclamation lag.
+
+**Edge finding (moody, cap 64, x4):** moodycamel::ConcurrentQueue exceeded the
+120 s timeout in 7/8 rounds at capacity 64 under x4 oversubscription (wedged in
+the drain/poison phase — its block-pool semantics interact badly with a tiny
+capacity hint and saturated implicit producers). Reported as configuration
+incompatibility, not scored.
+
+**C1 update (v2):** after pinning the probe to USER_INTERACTIVE, calib spread
+narrowed 97–172 → 93–148 ms. Placement explained part; the residual ~1.6x is
+genuine thermal/DVFS. Calib remains an environment-health screen; cross-queue
+fairness rests on interleaving.
+
+**Phase F remaining:** (1) results prose in main.tex from v2 numbers; (2) ARTIFACT.md; (3) venue deadline check; (4) human rewrite pass.
 
 ### Appendix: QoS table (throughput Mops/s, 4P:4C, ×1, matrix v1 medians)
 
