@@ -57,7 +57,16 @@ narrowed 97–172 → 93–148 ms. Placement explained part; the residual ~1.6x 
 genuine thermal/DVFS. Calib remains an environment-health screen; cross-queue
 fairness rests on interleaving.
 
-**Phase F remaining:** (1) results prose in main.tex from v2 numbers; (2) ARTIFACT.md; (3) venue deadline check; (4) human rewrite pass.
+| **F5** | **Fairness for free: FAA ticketing is near-perfectly fair; sub-queue designs trade fairness for throughput.** Per-producer push-count CoV: FAA <=0.008 everywhere (incl. x4); at 4:4 x4 others degrade (MS 0.14, Vyukov 0.12, moody 0.13, mutex 0.08); moody structurally unfair at producer-heavy shapes (0.18-0.19 at 6:2/7:1 — per-producer sub-queues). | v2 fair_cov column | MEASURED (v2; v1 spot-check pending if needed) |
+| **F6-lite** | Which role tolerates E-cores is design-specific: MS collapses with producers demoted (2.1 vs 4.3 — allocation is producer-side); moody the opposite (4.5 vs 2.1 — consumer-side block recycling). One paragraph in Results, not a headline. | v2 qos prod-bg/cons-bg rows | MEASURED |
+| **F7-lite** | The contention cliff: 1:1 -> 2:2 erases ~79% of FAA/Vyukov throughput (127.7->26.3, 118.4->25.2) but only ~33% of the mutex's — sharpens F3's "1:1 mirage" framing. | v2 ratio table | MEASURED |
+
+**H4 SUPPORTED (v2):** per-queue median throughput varies <=±5% across the 8
+trial rounds with no monotone decline; median per-config CoV 2.0% (p90 6.4%,
+worst 20.7% = moody 7:1, its unfairness makes it noisy). The interleaving +
+cooldown protocol held.
+
+**Phase F remaining:** (1) ~~results prose~~ DONE 2026-07-07 (main.tex fully drafted from v2); (2) ARTIFACT.md; (3) venue deadline check; (4) human rewrite pass; (5) optional: fairness figure for F5, cross-machine invitation via artifact.
 
 ### Appendix: QoS table (throughput Mops/s, 4P:4C, ×1, matrix v1 medians)
 
