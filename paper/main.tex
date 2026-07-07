@@ -1,10 +1,12 @@
-% MPMC queue tradeoffs on asymmetric client silicon -- IEEEtran skeleton.
+% MPMC queue tradeoffs on asymmetric client silicon -- IEEEtran.
 % Build: tectonic paper/main.tex   (figures come from scripts/make_plots.py)
 %
 % AUTHORSHIP NOTE (do not delete): drafts in this file are scaffolding produced
 % with AI assistance. Before any submission the human author must verify every
 % claim against paper/notes/claims.md and the data in paper/data/, rewrite the
 % prose in their own voice, and check the venue's AI-disclosure policy.
+% Every number below is traceable: paper/data/matrix_v2.csv (canonical, k=8)
+% and matrix_v1.csv (replication check); aggregation = scripts/make_plots.py.
 \documentclass[conference]{IEEEtran}
 
 \usepackage{graphicx}
@@ -12,9 +14,8 @@
 \usepackage{amsmath}
 \usepackage[hidelinks]{hyperref}
 
-\newcommand{\figtag}{v1} % dataset tag; bump when re-running the matrix
+\newcommand{\figtag}{v2} % dataset tag; v2 is canonical (see Sec. Methodology)
 
-% Placeholder box for figures that have not been generated yet.
 \newcommand{\maybefig}[2]{%
   \IfFileExists{assets/#1_\figtag.pdf}%
     {\includegraphics[width=#2]{assets/#1_\figtag.pdf}}%
@@ -33,85 +34,89 @@ dedeepyaavancha@gmail.com}}
 \maketitle
 
 \begin{abstract}
-Published evaluations of concurrent queue algorithms overwhelmingly report
-results from symmetric x86 server processors with pinned threads and active
-cooling. Client devices violate all three assumptions: cores are asymmetric
-(performance and efficiency clusters), thread placement is delegated to the
-OS (macOS exposes no affinity API on Apple silicon), and passive cooling makes
-sustained load thermally sensitive. We characterize four classic
-multi-producer/multi-consumer queue designs---a mutex-guarded deque, the
-Michael--Scott lock-free queue with epoch-based reclamation, Vyukov's bounded
-CAS queue, and a fetch-and-add ticket queue---plus an industrial reference
-implementation, on an Apple M2 (4 performance + 4 efficiency cores). Our
-experiments vary producer:consumer ratio, QoS-steered core placement, and
-oversubscription, with a coordinated-omission-aware latency methodology and
-thermally interleaved trials. [Headline findings inserted after the k=10 run:
-(1) progress guarantees vs.\ tail latency under preemption; (2) how P/E
-placement reshuffles throughput rankings; (3) where the textbook ranking
-survives.] All results are reproducible with one command from our open
-artifact.
+Published evaluations of concurrent queues overwhelmingly assume symmetric x86
+server cores, pinned threads, and active cooling. Client devices violate all
+three. We characterize four classic multi-producer/multi-consumer designs---a
+mutex-guarded queue, the Michael--Scott lock-free queue with epoch-based
+reclamation, Vyukov's bounded CAS queue, and a fetch-and-add (FAA) ticket
+queue---plus an industrial reference, on an Apple M2 (4 performance + 4
+efficiency cores), across producer:consumer ratios, QoS-steered core placement,
+and oversubscription, using coordinated-omission-aware latency measurement and
+thermally interleaved trials. Three results contradict the textbook ranking.
+(1)~Our pre-registered hypothesis---that the FAA queue's blocking-on-slot
+completion would collapse under preemption---\emph{inverted}: under $4\times$
+oversubscription the FAA queue improved by 77\% while the lock-free CAS queue
+lost 78\%, and the FAA tail (p99.9) was ${\sim}5\times$ better than every
+alternative; a capacity control shows the effect reverses at small capacity,
+making the finding a bounded law rather than a slogan. (2)~Efficiency-core
+placement reorders the ranking entirely: the FAA queue retains 96\% of its
+throughput on E-cores while the mutex retains 13\% and the CAS queue 6\%.
+(3)~At moderate mixed ratios on dedicated cores, the mutex baseline beats every
+lock-free design. We additionally measure the unbounded queue's true failure
+mode (742\,MB resident growth in a two-second run, traced to epoch-reclamation
+starvation under consumer parallelism) and near-perfect producer fairness for
+FAA ticketing. All results reproduce with one command from our open artifact.
 \end{abstract}
 
 \section{Introduction}
-% Motivation skeleton -- rewrite in author's voice.
-Lock-free queues are folklore-fast: the standard narrative says CAS beats
-locks, FAA beats CAS, and progress guarantees are what you pay for with
-complexity. That narrative was established on server-class symmetric
-multiprocessors with pinned threads. Meanwhile, most code that ships runs on
-client silicon: heterogeneous cores, opaque OS scheduling, passive cooling.
+Lock-free queues are folklore-fast: compare-and-swap beats locks, stronger
+progress guarantees cost complexity but buy robustness. That folklore was
+established on server-class symmetric multiprocessors with pinned threads.
+Most software instead runs on client silicon: heterogeneous cores, opaque OS
+scheduling, passive cooling.
 
 This paper asks a narrow, answerable question: \emph{how much of the textbook
 MPMC-queue tradeoff story survives contact with an asymmetric, unpinnable,
-thermally limited client SoC?} We make no claim of algorithmic novelty; the
-contribution is a careful characterization and a reproducible methodology for
-a measurement environment that prior work treats as out of scope.
+thermally limited client SoC?} We claim no algorithmic novelty; the
+contribution is a careful characterization, two methodology pitfalls we
+document for others, and a reproducible artifact.
 
 Contributions:
 \begin{itemize}
   \item A four-design comparison (blocking, lock-free node-based, lock-free
-        array CAS, FAA ticket) implemented from the literature in a single
-        harness, validated with ThreadSanitizer and invariant-checking stress
-        tests, plus \texttt{moodycamel::ConcurrentQueue} as an industrial
-        reference.
-  \item A client-silicon methodology: QoS-class core steering (the only
-        sanctioned placement control on macOS), oversubscription as a
-        preemption proxy, coordinated-omission-aware paced latency, process-
-        per-trial isolation, and thermal round-robin interleaving with a
-        per-trial calibration probe on a fanless machine.
-  \item [Findings, filled from data: H1 progress-guarantee tail flip under
-        oversubscription; H2 P/E placement effects; the dedicated-core case
-        where the mutex baseline is competitive or better.]
+        array CAS, FAA ticket) in one harness, validated with ThreadSanitizer
+        and invariant-checking stress tests, with
+        \texttt{moodycamel::ConcurrentQueue} as an industrial reference and an
+        SPSC queue as the specialization baseline.
+  \item A client-silicon methodology: QoS-class core steering, oversubscription
+        as a preemption proxy, coordinated-omission-aware paced latency,
+        process-per-trial isolation, thermal round-robin interleaving with a
+        pinned calibration probe---plus two measured confounders (probe
+        placement; launcher QoS inheritance) that silently distort na\"ive
+        setups on macOS.
+  \item Findings F1--F5 (Sec.~\ref{sec:results}): the capacity-conditional
+        inversion of the progress-guarantee prediction under preemption; the
+        E-core reordering; the mutex winning the dedicated-core middle; memory
+        (not speed) as the unbounded design's failure mode, mechanistically
+        traced to epoch-advancement starvation; and fairness as a free
+        consequence of FAA ticketing.
 \end{itemize}
 
 \section{Background and Related Work}
 \label{sec:background}
-% Condensed from paper/notes/related-work.md; keep citations tight.
-\textbf{Designs.} Michael and Scott's two-lock and non-blocking queues
-\cite{michael1996} anchor the node-based lineage; safe memory reclamation via
-hazard pointers \cite{michael2004} or epochs \cite{fraser2004} is its
-practical tax. Vyukov's bounded MPMC queue \cite{vyukov} popularized per-cell
-sequence coordination. Fetch-and-add designs (LCRQ \cite{morrison2013})
-exploit the observation that FAA scales better than contended CAS; the LMAX
-Disruptor \cite{thompson2011} is the industrial ticket/sequencer ancestor.
-Wait-free constructions \cite{yang2016} complete the progress taxonomy.
+\textbf{Designs.} Michael and Scott's non-blocking queue \cite{michael1996}
+anchors the node-based lineage; safe reclamation via hazard pointers
+\cite{michael2004} or epochs \cite{fraser2004} is its practical tax. Vyukov's
+bounded MPMC queue \cite{vyukov} popularized per-cell sequence coordination.
+FAA-based designs (LCRQ \cite{morrison2013}) exploit fetch-and-add's
+always-succeeds property; the LMAX Disruptor \cite{thompson2011} is the
+industrial ticket/sequencer ancestor; wait-free constructions \cite{yang2016}
+complete the progress taxonomy.
 
-\textbf{Methodology.} We follow Hoefler and Belli's guidance on reporting
-parallel-systems measurements \cite{hoefler2015} and Tene's critique of
-latency measurement under coordinated omission \cite{tene}.
+\textbf{Methodology.} We follow Hoefler and Belli's reporting guidance
+\cite{hoefler2015} and Tene's coordinated-omission critique \cite{tene}.
 
-\textbf{Gap.} Prior evaluations assume symmetric cores, thread pinning, and
-sustained-load thermal headroom; none of these hold on the devices where most
-software runs. We are not aware of a systematic MPMC queue characterization on
-asymmetric ARM client silicon.
+\textbf{Gap.} We are not aware of a systematic MPMC characterization on
+asymmetric ARM client silicon under OS-controlled placement.
 
 \section{Queue Designs Under Study}
 \label{sec:designs}
-Table~\ref{tab:designs} summarizes the design space along the axes that the
-experiments exercise.
+Table~\ref{tab:designs} summarizes the design space; implementations are
+faithful to the cited algorithms (128-byte padding on hot atomics throughout).
 
 \begin{table}[t]
-\caption{Design space. ``Blocking-on-slot'': a preempted claimant blocks the
-successor of its slot although claiming itself is wait-free.}
+\caption{Design space. ``blk-on-slot'': claiming is wait-free but a preempted
+claimant blocks its slot's successor.}
 \label{tab:designs}
 \centering
 \small
@@ -119,8 +124,8 @@ successor of its slot although claiming itself is wait-free.}
 \toprule
 Design & Storage & Claim & Progress & Reclaim \\
 \midrule
-mutex+deque & -- & lock & blocking & none \\
-Michael--Scott & nodes & CAS & lock-free & EBR \\
+mutex+queue & -- & lock & blocking & none \\
+Michael--Scott & nodes & CAS & lock-free & epochs \\
 Vyukov & array & CAS & lock-free & none \\
 FAA ticket & array & FAA & blk-on-slot & none \\
 moodycamel & blocks & mixed & lock-free & internal \\
@@ -128,107 +133,228 @@ moodycamel & blocks & mixed & lock-free & internal \\
 \end{tabular}
 \end{table}
 
-% One paragraph per design: what it is, the one implementation subtlety that
-% matters for interpretation (EBR stalls under preemption; Vyukov CAS retry;
-% FAA irrevocable tickets), each ~4 sentences. Draft from learn/28.
+Three implementation notes matter for interpretation. \emph{Michael--Scott}
+copies the value before its dequeue CAS (per the original) and retires nodes
+through a 3-epoch reclamation scheme whose advancement requires every
+in-operation thread to have observed the current epoch---a property that
+Sec.~\ref{sec:mem} shows becoming the bottleneck. \emph{Vyukov} claims cursor
+positions by CAS with unbounded individual retry. The \emph{FAA ticket} queue's
+claim is a single fetch-and-add (wait-free, no losers); its tickets are
+irrevocable, which makes completion blocking-on-slot and forbids a try-API ---
+our harness therefore terminates consumers with poison pills rather than
+shared counters.
 
 \section{Methodology}
 \label{sec:method}
-\textbf{Platform.} Apple M2 (MacBook Air, passively cooled), 4 performance +
-4 efficiency cores, macOS; Apple clang 17, \texttt{-O3}; 128-byte cache-line
-padding on all hot atomics.
+\textbf{Platform.} Apple M2 (MacBook Air, passively cooled), 4 P- + 4 E-cores,
+macOS; Apple clang 17, \texttt{-O3}.
 
-\textbf{Harness.} One process per trial emits one CSV row; the experiment
-matrix interleaves queues round-robin within each trial round so cross-queue
+\textbf{Harness.} One process per trial appends one CSV row; the matrix driver
+interleaves queues round-robin \emph{within} each trial round, so cross-queue
 comparisons occur under near-identical thermal state. A fixed
-dependent-arithmetic calibration loop is timed before every trial as a
-frequency proxy; its chronological trace (Fig.~\ref{fig:calib}) screens the
-dataset for thermal drift. Trial~0 of each configuration is discarded as
-warmup; we report medians with interquartile ranges over the remaining
-trials \cite{hoefler2015}.
+dependent-arithmetic calibration loop is timed before every trial. Trial~0 per
+configuration is warmup; we report medians with IQR over the remaining trials
+\cite{hoefler2015}. The canonical dataset (v2) contains 8 complete rounds of
+92 configurations; a prior full run (v1) serves as a replication check ---
+headline throughput medians agree within ${\sim}6\%$. Across configurations
+the median coefficient of variation is 2.0\% (p90: 6.4\%).
 
-\textbf{Shutdown protocol.} A reserved poison-pill value terminates consumers
-deterministically; this is required for the FAA design, whose irrevocable
-tickets make counter-based termination deadlock-prone.
-
-\textbf{Latency.} Producers are paced against a fixed schedule (total offered
-load split across producers, staggered); the payload carries the
-\emph{scheduled} send time, so producer lateness is charged to the reported
-tail rather than silently omitted \cite{tene}.
+\textbf{Latency.} Producers are paced against a fixed schedule (offered load
+split across producers, staggered); payloads carry the \emph{scheduled} send
+time, so producer lateness is charged to the reported tail rather than
+omitted \cite{tene}.
 
 \textbf{Placement and preemption.} macOS exposes no thread affinity on Apple
-silicon; we steer placement with thread QoS classes
-(\texttt{USER\_INTERACTIVE} biases performance cores,
-\texttt{BACKGROUND} efficiency cores) and treat the result as a bias, not an
-assignment. Oversubscription (thread count multiplied at fixed ratio) serves
-as a controlled preemption generator.
+silicon; we steer placement with thread QoS
+(\texttt{USER\_INTERACTIVE}$\,\to\,$P-cores,
+\texttt{BACKGROUND}$\,\to\,$E-cores) and treat it as a bias, not an
+assignment. Oversubscription (both thread counts multiplied at fixed ratio)
+serves as a controlled preemption generator.
+
+\textbf{Two confounders we measured so others can avoid them.}
+(i)~\emph{Probe placement:} with default QoS our calibration loop sometimes
+landed on an E-core; its spread (${\sim}1.77\times$) tracked the P/E speed
+ratio, not temperature. Pinning the probe to interactive QoS narrowed the
+spread; the residual (${\sim}1.6\times$ worst case) is genuine
+frequency/thermal variation. (ii)~\emph{Launcher QoS inheritance:} macOS
+worker threads inherit the spawning thread's QoS. Launched from a background
+shell, all v1 workers ran silently demoted, inflating dedicated-core p99.9 by
+$10$--$30\times$. Explicitly resetting worker QoS
+(\texttt{QOS\_CLASS\_DEFAULT}) fixed this in v2; v1's \emph{cross-queue}
+comparisons survived only because interleaving demoted all arms equally.
+Absolute latencies in this paper cite v2 exclusively.
+
+\textbf{Thermal validity.} Median per-queue throughput varies by at most
+$\pm5\%$ across the eight trial rounds with no monotone decline
+(Fig.~\ref{fig:calib} shows the probe trace), indicating the
+interleaving-plus-cooldown protocol kept thermal drift out of the
+comparisons.
 
 \section{Results}
 \label{sec:results}
-% Every claim here must have a row in paper/notes/claims.md with data behind
-% it. Numbers below are inserted from paper/data/summary_v1.md (k=5 triage)
-% and finalized from the k=10 run.
 
-\subsection{Throughput across producer:consumer ratios}
+\subsection{Throughput across ratios: the 1:1 mirage (F3)}
 \begin{figure}[t]\centering
 \maybefig{fig_throughput_ratio}{\linewidth}
 \caption{Median throughput by P:C ratio, dedicated cores, default QoS.
-Error bars: IQR.}
+Error bars: IQR over 7 kept trials.}
 \label{fig:ratio}
 \end{figure}
-[Draft after data: where the mutex baseline sits; FAA vs CAS ordering; the
-SPSC 1:1 reference point as the generality tax.]
+At 1:1 the array-based lock-free queues dominate (FAA 127.7, Vyukov 118.4 vs
+mutex 34.7 Mops/s) --- the configuration folklore is built on. One step to 2:2
+erases ${\sim}79\%$ of both (FAA 26.3, Vyukov 25.2), while the mutex loses only
+a third (23.3). From 2:2 through 4:4 and consumer-heavy mixes, \emph{the mutex
+baseline leads every lock-free MPMC design} (4:4: mutex 19.0 vs FAA 16.5,
+Vyukov 7.8, moodycamel 7.8, MS 6.2). The SPSC baseline (373.6 at 1:1) marks
+the price of MPMC generality: ${\sim}3\times$ over the best MPMC design in
+the only configuration where the comparison is legal.
 
-\subsection{Oversubscription: progress guarantees under preemption (H1)}
+\subsection{Preemption: the progress-guarantee inversion (F1)}
 \begin{figure}[t]\centering
 \maybefig{fig_oversubscription}{0.9\linewidth}
-\caption{Throughput at 4P:4C as threads are multiplied beyond cores
-(log--log). }
+\caption{Throughput at 4P:4C as thread counts are multiplied beyond the 8
+cores (log--log).}
 \label{fig:oversub}
 \end{figure}
 
 \begin{figure}[t]\centering
 \maybefig{fig_latency_tail}{\linewidth}
-\caption{Paced-load latency percentiles, dedicated (left) vs.\ 4$\times$
-oversubscribed (right), log scale.}
+\caption{Paced-load (1\,M\,msg/s) latency percentiles at 4P:4C, dedicated
+(left) vs $4\times$ oversubscribed (right), log scale.}
 \label{fig:tail}
 \end{figure}
-[Draft after data: does the blocking-on-slot FAA design lose its dedicated-core
-advantage under preemption, and by how much at p99.9?]
 
-\subsection{Core placement via QoS (H2)}
+We pre-registered the textbook prediction: the FAA queue's blocking-on-slot
+completion should degrade disproportionately under preemption, while lock-free
+designs degrade gracefully. The data inverted it
+(Fig.~\ref{fig:oversub}). From $\times1$ to $\times4$ oversubscription the
+FAA queue \emph{gained} 77\% (16.5$\,\to\,$29.2 Mops/s) while lock-free Vyukov
+lost 78\% (7.8$\,\to\,$1.7); the mutex lost 25\%, Michael--Scott 12\%. Tails
+told the same story (Fig.~\ref{fig:tail}): at $\times4$, FAA's p99.9 was
+15\,ms against 71--119\,ms for all alternatives. Our mechanism hypothesis:
+a preempted system turns CAS retry into a contention storm --- 32 runnable
+threads re-fighting two cursor cache lines, losers burning scheduler quanta ---
+whereas an FAA claim always succeeds, and each ticket holder then waits on its
+\emph{own} cell with a spin-then-yield loop that returns quanta to the
+scheduler.
+
+\begin{table}[t]
+\caption{The capacity control (throughput, Mops/s, 4P:4C, $\times4$
+oversubscription). FAA's advantage requires slack.}
+\label{tab:capacity}
+\centering
+\small
+\begin{tabular}{@{}lrrrr@{}}
+\toprule
+Capacity & FAA & Vyukov & MS & mutex \\
+\midrule
+64 & 2.6 & 1.1 & 5.3 & 4.7 \\
+1024 & \textbf{29.2} & 1.7 & 5.5 & 14.3 \\
+8192 & 20.4 & 2.4 & 5.3 & 15.6 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+The finding is capacity-conditional (Table~\ref{tab:capacity}): at capacity 64
+the FAA queue collapses to 2.6 Mops/s --- with little slack, a preempted ticket
+holder really does block its slot's successors, exactly as the taxonomy
+predicts. \emph{Wait-free claiming beats lock-free retry under preemption if
+and only if capacity absorbs scheduling gaps.} (Performance is also
+non-monotone in capacity --- 8192 is slower than 1024 --- consistent with a
+larger ring's cache footprint.)
+
+\subsection{Core asymmetry: placement reorders the ranking (F2)}
 \begin{figure}[t]\centering
 \maybefig{fig_qos}{\linewidth}
 \caption{Throughput at 4P:4C under QoS placement policies.}
 \label{fig:qos}
 \end{figure}
-[Draft after data: E-core penalty per design; asymmetric producer/consumer
-placements.]
+Moving all threads from interactive (P-core bias) to background (E-core bias)
+QoS retains 96\% of FAA's throughput (16.2$\,\to\,$15.6) but 13\% of the
+mutex's (19.8$\,\to\,$2.7) and 6\% of Vyukov's (8.6$\,\to\,$0.5): on
+efficiency cores the FAA queue is ${\sim}6\times$ the mutex and
+${\sim}30\times$ the CAS queue, the reverse of the P-core ranking. The
+mechanism rhymes with F1: slower cores widen CAS windows and lengthen lock
+hold times, amplifying retry storms and convoying, while no-retry claiming
+degrades only with raw core speed. Mixed placements are design-specific:
+Michael--Scott suffers most with producers demoted (2.1 vs 4.3 Mops/s ---
+node \emph{allocation} sits on the producer side), moodycamel the opposite
+(4.5 vs 2.1 --- consumer-side block recycling), a reminder that ``which role
+gets the fast cores'' is an algorithm property, not a scheduling detail.
 
-\subsection{Thermal validity}
+\subsection{Memory as the failure mode of unboundedness (F4/H3)}
+\label{sec:mem}
+The unbounded Michael--Scott queue never reports full; imbalance lands in
+memory instead. In two-second saturated runs its peak RSS reached 376\,MB at
+1:1 and \textbf{742\,MB at 1:7}, versus 1--2\,MB for every bounded design.
+The ratio asymmetry (7\,MB at 7:1 vs 742\,MB at 1:7) localizes the mechanism:
+epoch advancement requires \emph{every} pinned thread to sit at the current
+epoch, and with seven saturated consumers that alignment rarely holds ---
+reclamation starves, so consumer parallelism converts directly into
+reclamation lag. Unbounded designs should be evaluated on a memory axis, not
+only a speed axis.
+
+\subsection{Fairness for free (F5)}
+The coefficient of variation of per-producer completed pushes measures
+producer starvation. FAA ticketing is near-perfectly fair everywhere
+(CoV $\le 0.008$, including $\times4$ oversubscription) --- FIFO tickets are
+fairness by construction. All other designs degrade under stress (4:4
+$\times4$: MS 0.14, Vyukov 0.12, moodycamel 0.13, mutex 0.08), and
+moodycamel is structurally unfair at producer-heavy dedicated shapes
+(CoV 0.18--0.19 at 6:2 and 7:1), consistent with its per-producer sub-queue
+architecture trading fairness for throughput.
+
+\subsection{Dedicated-core latency, and an incompatibility}
+On dedicated cores (post-confounder-fix, v2), median latencies are sub-2\,\textmu s
+for all designs (FAA best at 333\,ns; the mutex worst at 1.75\,\textmu s with
+p99 of 44\,\textmu s vs 5--12\,\textmu s for the rest); p99.9 spans only
+${\sim}2\times$ across designs (MS best at 272\,\textmu s). Preemption, not
+the dedicated case, is what separates the designs. Separately, moodycamel
+exceeded a 120\,s timeout in 7 of 8 rounds at capacity 64 under $\times4$
+oversubscription (wedged in the drain phase); we report this as a
+configuration incompatibility rather than scoring it.
+
+\subsection{Thermal screen}
 \begin{figure}[t]\centering
 \maybefig{fig_calib}{\linewidth}
-\caption{Calibration-probe trace across the full matrix (thermal screen).}
+\caption{Pinned calibration-probe trace across the matrix (thermal screen).}
 \label{fig:calib}
 \end{figure}
 
 \section{Threats to Validity}
 \label{sec:threats}
-Single machine and OS (stated scope: client characterization, not a general
-ranking); QoS placement is a scheduler bias, not pinning -- we report policies,
-not measured per-sample core residency; our implementations are faithful but
-not micro-optimized to each design's best known form (the industrial reference
-arm bounds this gap); Apple silicon's memory subsystem details are not
-publicly documented, so microarchitectural attribution is necessarily
-inferential.
+Single machine and OS: we characterize one client SoC and claim no general
+ranking. QoS is a scheduler bias, not pinning; we report policies, and our own
+confounder analysis (Sec.~\ref{sec:method}) quantifies how easily placement
+contaminates instruments. Implementations are faithful but not
+micro-optimized to each design's best-known form; the industrial reference
+arm bounds that gap. Apple's memory subsystem is undocumented, so mechanism
+explanations are stated as hypotheses consistent with the data
+(``consistent with,'' never ``because''). The FAA design's throughput gain
+under oversubscription, while replicated across two full runs and
+capacity-controlled, deserves confirmation on other asymmetric parts
+(e.g., Intel hybrid, other Apple generations) --- our artifact makes this a
+one-command experiment for anyone with such hardware.
 
 \section{Conclusion}
-[One paragraph, written last, matching only what the data supports.]
+On an asymmetric, unpinnable, passively cooled client SoC, the textbook MPMC
+ranking failed three ways: the mutex won the dedicated-core middle; the
+design with the \emph{weakest} completion guarantee (FAA ticketing) was the
+most robust to both preemption and efficiency cores --- provided capacity
+absorbs scheduling gaps --- while the lock-free CAS design was the most
+fragile; and the unbounded lock-free queue's binding constraint was memory,
+not speed. The practical guidance is correspondingly conditional: on client
+silicon, choose FAA ticketing for preemption- and placement-robustness with
+adequate capacity, a mutex for simplicity at moderate mixed ratios, and treat
+1:1 microbenchmarks as advertising. More broadly: progress-guarantee
+taxonomy is not a performance model --- measurement under the deployment
+regime is.
 
 \section*{Artifact}
-All code, data, and figure pipelines:
+Code, datasets (raw CSVs), and figure pipeline:
 \url{https://github.com/Dd1235/SPSC_Queue}. \texttt{scripts/reproduce.sh}
-rebuilds the dataset and every figure in this paper.
+regenerates the dataset and every figure; \texttt{paper/notes/claims.md} maps
+each claim to its data.
 
 \bibliographystyle{IEEEtran}
 \bibliography{refs}
