@@ -22,6 +22,13 @@
 // Harness/tests terminate consumers with poison-pill values, never by racing a
 // counter. Bounded, array-backed -> no reclamation problem. Capacity rounds up
 // to a power of two.
+//
+// CONTROL VARIANT (the study's F1-attribution experiment): CasClaim=true takes
+// tickets with a CAS-increment retry loop instead of fetch_add, keeping
+// EVERYTHING else identical (same cells, same turn protocol, same
+// blocking-on-slot completion, same spin-then-yield waits). Comparing
+// FAAQueue<T,false> vs FAAQueue<T,true> under oversubscription isolates the
+// claim primitive; comparing Vyukov vs Vyukov<Backoff> isolates spin policy.
 #pragma once
 
 #include <atomic>
@@ -33,7 +40,7 @@
 
 namespace mpmc {
 
-template <class T> class FAAQueue {
+template <class T, bool CasClaim = false> class FAAQueue {
     struct Cell {
         std::atomic<std::size_t> turn;
         alignas(T) unsigned char storage[sizeof(T)];
@@ -53,6 +60,22 @@ template <class T> class FAAQueue {
                 std::this_thread::yield();
                 spins = 0;
             }
+        }
+    }
+
+    // The claim primitive under test. fetch_add always succeeds in one RMW;
+    // the CAS variant can lose and retry -- that difference is the experiment.
+    static std::size_t take_ticket(std::atomic<std::size_t>& counter) {
+        if constexpr (CasClaim) {
+            std::size_t t = counter.load(std::memory_order_relaxed);
+            while (!counter.compare_exchange_weak(t, t + 1, std::memory_order_relaxed)) {
+                // t was reloaded by the failed CAS; retry immediately (no
+                // backoff -- mirrors Vyukov's raw retry so the comparison is
+                // claim-primitive-only).
+            }
+            return t;
+        } else {
+            return counter.fetch_add(1, std::memory_order_relaxed);
         }
     }
 
@@ -85,7 +108,7 @@ public:
 
     // Any thread. Blocks (spin+yield) while the queue is empty.
     void pop(T& out) {
-        const std::size_t t = popTicket_.fetch_add(1, std::memory_order_relaxed);
+        const std::size_t t = take_ticket(popTicket_);
         Cell& c = cells_[t & mask_];
         const std::size_t round = t >> shift_;
         wait_for(c.turn, 2 * round + 1);  // reader's turn
@@ -96,7 +119,7 @@ public:
 
 private:
     template <class U> void emplace_impl(U&& v) {
-        const std::size_t t = pushTicket_.fetch_add(1, std::memory_order_relaxed);
+        const std::size_t t = take_ticket(pushTicket_);
         Cell& c = cells_[t & mask_];
         const std::size_t round = t >> shift_;
         wait_for(c.turn, 2 * round);  // writer's turn
