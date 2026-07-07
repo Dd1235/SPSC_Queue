@@ -66,6 +66,39 @@ trial rounds with no monotone decline; median per-config CoV 2.0% (p90 6.4%,
 worst 20.7% = moody 7:1, its unfairness makes it noisy). The interleaving +
 cooldown protocol held.
 
+## F1-ATTRIBUTION (matrix v3, k=8, controls; 2026-07-07) — the decomposition
+
+Two single-variable controls decompose the oversubscription inversion:
+
+| Arm | Claim | Completion | Spin policy | x1 -> x4 Mops/s | p99.9 @x4 |
+|---|---|---|---|---|---|
+| vyukov | CAS | shared-cursor | raw retry | 7.88 -> 1.66 | 68.7 ms |
+| **vyukov-b** | CAS | shared-cursor | **+yield** | 8.00 -> 1.68 | 67.5 ms |
+| **casticket** | **CAS** | ticket/turn | spin+yield | 7.06 -> 19.33 | 14.1 ms |
+| faa | FAA | ticket/turn | spin+yield | 16.46 -> 29.68 | 14.2 ms |
+
+**Verdicts (each row differs from a neighbor in exactly one property):**
+1. **Spin policy: eliminated.** Backoff+yield changes nothing for Vyukov
+   (identical throughput, tails, E-core collapse 0.48 vs 0.55). The reviewer
+   objection "did you try backoff?" is answered with data.
+2. **The ticket/turn slot discipline carries the robustness.** casticket keeps
+   the rising-under-oversubscription profile, the 14 ms tail, and E-core
+   immunity (12.99 Mops/s all-bg) despite using CAS -- architecture, not
+   primitive, prevents the collapse.
+3. **The FAA primitive buys ~2x throughput within the architecture** (29.7 vs
+   19.3 at x4; 16.5 vs 7.1 at x1) -- counters: casticket loses ~1.0
+   claim-CAS/op where FAA loses exactly 0.
+4. Mechanism counters (v3s): vyukov pays 0.7 CAS-fails + 1.8 cursor re-reads
+   per op (both on shared lines) vs ticket designs' ~0.06 secondary ops --
+   the coherence-storm explanation is now measured, not hypothesized. Also:
+   raw vyukov at x4 shows FEWER involuntary switches than vyukov-b while both
+   collapse -- quanta hoarding is not the failure mode; shared-line traffic is.
+
+F1 final form for the paper: *on this platform, preemption- and placement-
+robustness comes from the ticket/turn slot discipline; the FAA primitive is a
+~2x throughput multiplier within it; progress-guarantee class and spin policy
+predict nothing.* v3 is also the third replication of F1/F2/F3 headline shapes.
+
 **Phase F remaining:** (1) ~~results prose~~ DONE 2026-07-07 (main.tex fully drafted from v2); (2) ARTIFACT.md; (3) venue deadline check; (4) human rewrite pass; (5) optional: fairness figure for F5, cross-machine invitation via artifact.
 
 ### Appendix: QoS table (throughput Mops/s, 4P:4C, ×1, matrix v1 medians)
