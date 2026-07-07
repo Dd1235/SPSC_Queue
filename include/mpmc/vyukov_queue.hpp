@@ -25,6 +25,13 @@
 //     per-cell sequence plays both roles.
 //   - Values are destroyed at pop time (precise lifetime -- contrast with the
 //     MS queue's EBR-deferred destruction).
+//
+// CONTROL VARIANT (F1-attribution): Backoff=true inserts the SAME spin-then-
+// yield policy the FAA queue uses (1024 spins, then yield) into every retry
+// path -- CAS failure and behind-the-cursor re-reads -- keeping the algorithm
+// otherwise identical. Vyukov vs Vyukov<Backoff> isolates spin policy;
+// FAAQueue<CasClaim> isolates the claim primitive. Together they decompose
+// the oversubscription inversion.
 #pragma once
 
 #include <atomic>
@@ -32,12 +39,13 @@
 #include <cstddef>
 #include <cstdint>
 #include <new>
+#include <thread>
 #include <type_traits>
 #include <utility>
 
 namespace mpmc {
 
-template <class T> class VyukovQueue {
+template <class T, bool Backoff = false> class VyukovQueue {
     struct Cell {
         std::atomic<std::size_t> seq;
         alignas(T) unsigned char storage[sizeof(T)];
@@ -49,6 +57,19 @@ template <class T> class VyukovQueue {
         while (p < v) p <<= 1;
         return p;
     }
+
+    // Mirror of FAAQueue::wait_for's politeness, applied per retry iteration.
+    struct Politeness {
+        int spins = 0;
+        void lost_a_round() {
+            if constexpr (Backoff) {
+                if (++spins >= 1024) {
+                    std::this_thread::yield();
+                    spins = 0;
+                }
+            }
+        }
+    };
 
 public:
     explicit VyukovQueue(std::size_t capacity)
@@ -79,6 +100,7 @@ public:
     // Any thread. False when empty.
     bool try_pop(T& out) {
         std::size_t pos = dequeuePos_.load(std::memory_order_relaxed);
+        Politeness be;
         for (;;) {
             Cell& c = cells_[pos & mask_];
             const std::size_t seq = c.seq.load(std::memory_order_acquire);
@@ -95,10 +117,12 @@ public:
                     return true;
                 }
                 // CAS failed: `pos` was refreshed by compare_exchange; retry.
+                be.lost_a_round();
             } else if (dif < 0) {
                 return false;  // cell not yet produced -> queue empty at our pos
             } else {
                 pos = dequeuePos_.load(std::memory_order_relaxed);  // we're behind
+                be.lost_a_round();
             }
         }
     }
@@ -106,6 +130,7 @@ public:
 private:
     template <class U> bool emplace_impl(U&& v) {
         std::size_t pos = enqueuePos_.load(std::memory_order_relaxed);
+        Politeness be;
         for (;;) {
             Cell& c = cells_[pos & mask_];
             const std::size_t seq = c.seq.load(std::memory_order_acquire);
@@ -120,10 +145,12 @@ private:
                     c.seq.store(pos + 1, std::memory_order_release);
                     return true;
                 }
+                be.lost_a_round();  // CAS lost
             } else if (dif < 0) {
                 return false;  // cell still holds last lap's data -> full
             } else {
                 pos = enqueuePos_.load(std::memory_order_relaxed);
+                be.lost_a_round();
             }
         }
     }
