@@ -74,18 +74,31 @@ struct MSAdapter {
     explicit MSAdapter(std::size_t cap) : q(cap) {}
     bool try_push(std::uint64_t v) { return q.try_push(v); }
     bool try_pop(std::uint64_t& v) { return q.try_pop(v); }
+    std::uint64_t stat_retries() const { return q.stat_retries(); }
+    std::uint64_t stat_secondary() const { return q.stat_secondary(); }
 };
 
 struct VyukovAdapter {
-    mpmc::VyukovQueue<std::uint64_t> q;
+    mpmc::VyukovQueue<std::uint64_t, false> q;
     explicit VyukovAdapter(std::size_t cap) : q(cap) {}
     bool try_push(std::uint64_t v) { return q.try_push(v); }
     bool try_pop(std::uint64_t& v) { return q.try_pop(v); }
+    std::uint64_t stat_retries() const { return q.stat_retries(); }
+    std::uint64_t stat_secondary() const { return q.stat_secondary(); }
 };
 
-struct FAAAdapter {
-    mpmc::FAAQueue<std::uint64_t> q;
-    explicit FAAAdapter(std::size_t cap) : q(cap) {}
+struct VyukovBackoffAdapter {  // control: same algorithm + FAA's spin-then-yield
+    mpmc::VyukovQueue<std::uint64_t, true> q;
+    explicit VyukovBackoffAdapter(std::size_t cap) : q(cap) {}
+    bool try_push(std::uint64_t v) { return q.try_push(v); }
+    bool try_pop(std::uint64_t& v) { return q.try_pop(v); }
+    std::uint64_t stat_retries() const { return q.stat_retries(); }
+    std::uint64_t stat_secondary() const { return q.stat_secondary(); }
+};
+
+template <bool CasClaim> struct TicketAdapter {
+    mpmc::FAAQueue<std::uint64_t, CasClaim> q;
+    explicit TicketAdapter(std::size_t cap) : q(cap) {}
     bool try_push(std::uint64_t v) {
         q.push(v);
         return true;
@@ -94,16 +107,26 @@ struct FAAAdapter {
         q.pop(v);
         return true;
     }
+    std::uint64_t stat_retries() const { return q.stat_retries(); }
+    std::uint64_t stat_secondary() const { return q.stat_secondary(); }
 };
+using FAAAdapter = TicketAdapter<false>;
+using CasTicketAdapter = TicketAdapter<true>;  // control: CAS claim, same completion
 
 struct MutexAdapter {
+    std::uint64_t stat_retries() const { return 0; }
+    std::uint64_t stat_secondary() const { return 0; }
     bench::MutexQueue<std::uint64_t> q;
     explicit MutexAdapter(std::size_t cap) : q(cap) {}
     bool try_push(std::uint64_t v) { return q.try_push(v); }
     bool try_pop(std::uint64_t& v) { return q.try_pop(v); }
 };
 
-struct SPSCAdapter {  // valid only for exactly 1 producer + 1 consumer
+struct SPSCAdapter {
+    std::uint64_t stat_retries() const { return 0; }
+    std::uint64_t stat_secondary() const {
+        return 0;
+    }  // valid only for exactly 1 producer + 1 consumer
     spsc::SPSCQueue<std::uint64_t> q;
     explicit SPSCAdapter(std::size_t cap) : q(cap) {}
     bool try_push(std::uint64_t v) { return q.try_push(v); }
@@ -112,6 +135,8 @@ struct SPSCAdapter {  // valid only for exactly 1 producer + 1 consumer
 
 #ifdef SPSC_HAVE_MOODYCAMEL
 struct MoodyAdapter {
+    std::uint64_t stat_retries() const { return 0; }
+    std::uint64_t stat_secondary() const { return 0; }
     moodycamel::ConcurrentQueue<std::uint64_t> q;
     explicit MoodyAdapter(std::size_t cap) : q(cap) {}
     bool try_push(std::uint64_t v) { return q.try_enqueue(v); }
@@ -139,8 +164,22 @@ struct Result {
     std::uint64_t p50 = 0, p99 = 0, p999 = 0, mx = 0;
     double fair_cov = 0;  // CoV of per-producer push counts (throughput mode)
     std::uint64_t calib_ns = 0;
-    double peak_rss_mb = 0;  // process peak RSS (H3: unbounded MS memory growth)
+    double peak_rss_mb = 0;       // process peak RSS (H3: unbounded MS memory growth)
+    double cons_cov = 0;          // CoV of per-consumer pop counts (consumer fairness)
+    long vcsw = 0, ivcsw = 0;     // voluntary / involuntary context switches
+    double retries_per_op = 0;    // stats build: queue-specific primary counter
+    double secondary_per_op = 0;  // stats build: queue-specific secondary counter
 };
+
+double cov_of(const std::vector<std::uint64_t>& xs) {
+    if (xs.empty()) return 0.0;
+    double sum = 0, sq = 0;
+    for (auto v : xs) sum += static_cast<double>(v);
+    const double mean = sum / static_cast<double>(xs.size());
+    if (mean <= 0) return 0.0;
+    for (auto v : xs) sq += (static_cast<double>(v) - mean) * (static_cast<double>(v) - mean);
+    return std::sqrt(sq / static_cast<double>(xs.size())) / mean;
+}
 
 void apply_qos(const std::string& policy, bool isProducer) {
 #ifdef __APPLE__
@@ -212,10 +251,11 @@ template <class Q> Result run_throughput(const Config& cfg) {
     std::atomic<bool> stop{false};
     std::atomic<std::uint64_t> pops{0};
     std::vector<std::uint64_t> pushed(static_cast<std::size_t>(P), 0);
+    std::vector<std::uint64_t> popped(static_cast<std::size_t>(C), 0);
 
     std::vector<std::thread> prods, cons;
     for (int c = 0; c < C; ++c) {
-        cons.emplace_back([&] {
+        cons.emplace_back([&, c] {
             apply_qos(cfg.qos, false);
             std::uint64_t v = 0, local = 0;
             for (;;) {
@@ -226,6 +266,7 @@ template <class Q> Result run_throughput(const Config& cfg) {
                 if (v == kPoison) break;
                 ++local;
             }
+            popped[static_cast<std::size_t>(c)] = local;
             pops.fetch_add(local, std::memory_order_relaxed);
         });
     }
@@ -252,13 +293,13 @@ template <class Q> Result run_throughput(const Config& cfg) {
     Result r;
     r.ops = pops.load();
     r.elapsed = elapsed;
-    // fairness: coefficient of variation of per-producer push counts
-    double sum = 0, sq = 0;
-    for (auto v : pushed) sum += static_cast<double>(v);
-    const double mean = sum / P;
-    for (auto v : pushed)
-        sq += (static_cast<double>(v) - mean) * (static_cast<double>(v) - mean);
-    r.fair_cov = (mean > 0) ? std::sqrt(sq / P) / mean : 0.0;
+    r.fair_cov = cov_of(pushed);  // producer fairness
+    r.cons_cov = cov_of(popped);  // consumer fairness (completes F5)
+    if (r.ops > 0) {
+        r.retries_per_op = static_cast<double>(q.stat_retries()) / static_cast<double>(r.ops);
+        r.secondary_per_op =
+            static_cast<double>(q.stat_secondary()) / static_cast<double>(r.ops);
+    }
     return r;
 }
 
@@ -271,6 +312,7 @@ template <class Q> Result run_latency(const Config& cfg) {
     const std::uint64_t sends =
         static_cast<std::uint64_t>(cfg.seconds * perProducerRate);  // per producer
 
+    std::vector<std::uint64_t> popped(static_cast<std::size_t>(C), 0);
     std::vector<std::vector<std::uint64_t>> samples(static_cast<std::size_t>(C));
     for (auto& s : samples)
         s.reserve(
@@ -288,6 +330,7 @@ template <class Q> Result run_latency(const Config& cfg) {
                     continue;
                 }
                 if (v == kPoison) break;
+                ++popped[static_cast<std::size_t>(c)];
                 const std::uint64_t nowv = now_ns();
                 if (mine.size() < mine.capacity()) mine.push_back(nowv - v);
             }
@@ -323,6 +366,15 @@ template <class Q> Result run_latency(const Config& cfg) {
     Result r;
     r.ops = all.size();
     r.elapsed = cfg.seconds;
+    r.cons_cov = cov_of(popped);
+    std::uint64_t total_pops = 0;
+    for (auto v : popped) total_pops += v;
+    if (total_pops > 0) {
+        r.retries_per_op =
+            static_cast<double>(q.stat_retries()) / static_cast<double>(total_pops);
+        r.secondary_per_op =
+            static_cast<double>(q.stat_secondary()) / static_cast<double>(total_pops);
+    }
     if (!all.empty()) {
         double sum = 0;
         for (auto v : all) sum += static_cast<double>(v);
@@ -351,15 +403,17 @@ void write_csv(const Config& cfg, const Result& r) {
     if (std::ftell(f) == 0)
         std::fprintf(f, "queue,mode,producers,consumers,oversubscribe,capacity,qos,seconds,"
                         "rate,trial,ops,elapsed_s,throughput_mops,mean_ns,p50_ns,p99_ns,"
-                        "p999_ns,max_ns,fair_cov,calib_ns,peak_rss_mb,unix_time\n");
-    std::fprintf(f,
-                 "%s,%s,%d,%d,%d,%zu,%s,%.2f,%.0f,%d,%" PRIu64 ",%.4f,%.3f,%.1f,%" PRIu64
-                 ",%" PRIu64 ",%" PRIu64 ",%" PRIu64 ",%.4f,%" PRIu64 ",%.1f,%ld\n",
-                 cfg.queue.c_str(), cfg.mode.c_str(), cfg.producers, cfg.consumers,
-                 cfg.oversubscribe, cfg.capacity, cfg.qos.c_str(), cfg.seconds, cfg.rate,
-                 cfg.trial, r.ops, r.elapsed, r.ops / r.elapsed / 1e6, r.mean_ns, r.p50, r.p99,
-                 r.p999, r.mx, r.fair_cov, r.calib_ns, r.peak_rss_mb,
-                 static_cast<long>(std::time(nullptr)));
+                        "p999_ns,max_ns,fair_cov,cons_cov,vcsw,ivcsw,retries_per_op,"
+                        "secondary_per_op,calib_ns,peak_rss_mb,unix_time\n");
+    std::fprintf(
+        f,
+        "%s,%s,%d,%d,%d,%zu,%s,%.2f,%.0f,%d,%" PRIu64 ",%.4f,%.3f,%.1f,%" PRIu64 ",%" PRIu64
+        ",%" PRIu64 ",%" PRIu64 ",%.4f,%.4f,%ld,%ld,%.4f,%.4f,%" PRIu64 ",%.1f,%ld\n",
+        cfg.queue.c_str(), cfg.mode.c_str(), cfg.producers, cfg.consumers, cfg.oversubscribe,
+        cfg.capacity, cfg.qos.c_str(), cfg.seconds, cfg.rate, cfg.trial, r.ops, r.elapsed,
+        r.ops / r.elapsed / 1e6, r.mean_ns, r.p50, r.p99, r.p999, r.mx, r.fair_cov, r.cons_cov,
+        r.vcsw, r.ivcsw, r.retries_per_op, r.secondary_per_op, r.calib_ns, r.peak_rss_mb,
+        static_cast<long>(std::time(nullptr)));
     std::fclose(f);
 }
 
@@ -409,13 +463,19 @@ int main(int argc, char** argv) {
     }
 
     const std::uint64_t calib = spin_calibration();
+    rusage ru0{};
+    getrusage(RUSAGE_SELF, &ru0);
     Result r;
     if (cfg.queue == "ms")
         r = dispatch_mode<MSAdapter>(cfg);
     else if (cfg.queue == "vyukov")
         r = dispatch_mode<VyukovAdapter>(cfg);
+    else if (cfg.queue == "vyukov-b")
+        r = dispatch_mode<VyukovBackoffAdapter>(cfg);
     else if (cfg.queue == "faa")
         r = dispatch_mode<FAAAdapter>(cfg);
+    else if (cfg.queue == "casticket")
+        r = dispatch_mode<CasTicketAdapter>(cfg);
     else if (cfg.queue == "mutex")
         r = dispatch_mode<MutexAdapter>(cfg);
     else if (cfg.queue == "spsc")
@@ -430,6 +490,10 @@ int main(int argc, char** argv) {
     }
     r.calib_ns = calib;
     r.peak_rss_mb = peak_rss_mb();
+    rusage ru1{};
+    getrusage(RUSAGE_SELF, &ru1);
+    r.vcsw = ru1.ru_nvcsw - ru0.ru_nvcsw;     // voluntary (yields that slept)
+    r.ivcsw = ru1.ru_nivcsw - ru0.ru_nivcsw;  // involuntary (preemptions)
 
     if (cfg.queue == "ms") mpmc::ebr::flush_all_unsafe();
 
