@@ -14,13 +14,15 @@
 \usepackage{amsmath}
 \usepackage[hidelinks]{hyperref}
 
-\newcommand{\figtag}{v2} % dataset tag; v2 is canonical (see Sec. Methodology)
+\newcommand{\figtag}{v2} % default dataset tag; per-figure tags override below
+% Datasets: v2 = full-matrix headline (k=8); v3 = focus matrix with the two
+% control arms (k=8); v3s = instrumented-build mechanism dataset.
 
-\newcommand{\maybefig}[2]{%
-  \IfFileExists{assets/#1_\figtag.pdf}%
-    {\includegraphics[width=#2]{assets/#1_\figtag.pdf}}%
+\newcommand{\maybefig}[3][\figtag]{%
+  \IfFileExists{assets/#2_#1.pdf}%
+    {\includegraphics[width=#3]{assets/#2_#1.pdf}}%
     {\fbox{\parbox[c][3.2cm][c]{0.9\linewidth}{\centering placeholder
-      (\texttt{\detokenize{#1}}): run \texttt{scripts/reproduce.sh}}}}}
+      (\texttt{\detokenize{#2}}): run \texttt{scripts/reproduce.sh}}}}}
 
 \begin{document}
 
@@ -43,12 +45,19 @@ queue---plus an industrial reference, on an Apple M2 (4 performance + 4
 efficiency cores), across producer:consumer ratios, QoS-steered core placement,
 and oversubscription, using coordinated-omission-aware latency measurement and
 thermally interleaved trials. Three results contradict the textbook ranking.
-(1)~Our pre-registered hypothesis---that the FAA queue's blocking-on-slot
-completion would collapse under preemption---\emph{inverted}: under $4\times$
-oversubscription the FAA queue improved by 77\% while the lock-free CAS queue
-lost 78\%, and the FAA tail (p99.9) was ${\sim}5\times$ better than every
-alternative; a capacity control shows the effect reverses at small capacity,
-making the finding a bounded law rather than a slogan. (2)~Efficiency-core
+(1)~Our pre-registered hypothesis---that the FAA ticket queue's
+blocking-on-slot completion would collapse under preemption---\emph{inverted}:
+under $4\times$ oversubscription the FAA queue improved by 77--94\% while the
+lock-free CAS queue lost ${\sim}80\%$, with a ${\sim}5\times$ tail advantage.
+Two single-variable controls decompose the inversion: a yielding-backoff
+variant of the CAS queue changes nothing (spin policy eliminated), while a
+CAS-claim variant of the ticket queue retains the robustness (the ticket/turn
+slot discipline, not the atomic primitive, prevents the collapse) at half the
+throughput (the FAA primitive's measured contribution). Instrumented builds
+confirm the mechanism: the CAS queue pays 0.7 failed CASes plus 1.8
+shared-cursor re-reads per operation, where ticket designs wait on private
+cells. A capacity control bounds the finding: with only 64 slots of slack,
+blocking-on-slot re-emerges and the textbook prediction returns. (2)~Efficiency-core
 placement reorders the ranking entirely: the FAA queue retains 96\% of its
 throughput on E-cores while the mutex retains 13\% and the CAS queue 6\%.
 (3)~At moderate mixed ratios on dedicated cores, the mutex baseline beats every
@@ -84,29 +93,56 @@ Contributions:
         pinned calibration probe---plus two measured confounders (probe
         placement; launcher QoS inheritance) that silently distort na\"ive
         setups on macOS.
-  \item Findings F1--F5 (Sec.~\ref{sec:results}): the capacity-conditional
-        inversion of the progress-guarantee prediction under preemption; the
-        E-core reordering; the mutex winning the dedicated-core middle; memory
-        (not speed) as the unbounded design's failure mode, mechanistically
-        traced to epoch-advancement starvation; and fairness as a free
-        consequence of FAA ticketing.
+  \item Findings F1--F5 (Sec.~\ref{sec:results}), including a controlled
+        decomposition of the central surprise: preemption robustness is a
+        property of the ticket/turn \emph{slot discipline}, not of the claim
+        primitive, spin policy, or progress-guarantee class --- established
+        with two single-variable control variants and per-operation retry
+        counters, and bounded by a capacity control. Plus: the E-core
+        reordering; the mutex winning the dedicated-core middle; memory (not
+        speed) as the unbounded design's failure mode, traced to
+        epoch-advancement starvation; and fairness as a free consequence of
+        ticketing.
 \end{itemize}
 
 \section{Background and Related Work}
 \label{sec:background}
-\textbf{Designs.} Michael and Scott's non-blocking queue \cite{michael1996}
-anchors the node-based lineage; safe reclamation via hazard pointers
-\cite{michael2004} or epochs \cite{fraser2004} is its practical tax. Vyukov's
-bounded MPMC queue \cite{vyukov} popularized per-cell sequence coordination.
-FAA-based designs (LCRQ \cite{morrison2013}) exploit fetch-and-add's
-always-succeeds property; the LMAX Disruptor \cite{thompson2011} is the
-industrial ticket/sequencer ancestor; wait-free constructions \cite{yang2016}
-complete the progress taxonomy.
+\textbf{Queue designs.} Michael and Scott's non-blocking queue
+\cite{michael1996} anchors the node-based lineage, later refined by optimistic
+\cite{ladanmozes2004} and wait-free \cite{kogan2011,yang2016} constructions;
+safe memory reclamation --- hazard pointers \cite{michael2004}, epochs
+\cite{fraser2004}, and their measured tradeoffs \cite{hart2007} --- is the
+lineage's practical tax, and our results show it becoming the binding
+constraint (Sec.~\ref{sec:mem}). Array-based designs begin with Tsigas and
+Zhang \cite{tsigas2001}; Vyukov's bounded queue \cite{vyukov} popularized
+per-cell sequence coordination. Fetch-and-add designs exploit FAA's
+always-succeeds property, from the LMAX Disruptor's industrial sequencer
+\cite{thompson2011} to LCRQ \cite{morrison2013} and SCQ \cite{nikolaev2019};
+flat combining \cite{hendler2010} reframes the contention question entirely.
+\texttt{moodycamel::ConcurrentQueue} \cite{moodycamel} represents deployed
+industrial practice.
+
+\textbf{Characterization studies.} Our genre follows David et al.'s
+cross-platform synchronization study \cite{david2013}, which showed
+synchronization conclusions to be strongly hardware-dependent, and Guiroux et
+al.\ \cite{guiroux2016}, who showed lock rankings shift with workload and
+machine --- both on symmetric servers. We extend the genre's central lesson
+to asymmetric client silicon.
+
+\textbf{Asymmetric multicores.} Single-ISA heterogeneous processors were
+studied for energy scheduling well before they reached the desktop
+\cite{fedorova2009}; ARM's big.LITTLE \cite{greenhalgh2011} and Intel's hybrid
+Alder Lake \cite{rotem2022} made them mainstream. That literature concerns
+\emph{scheduler} policy; how heterogeneity reshuffles \emph{lock-free
+algorithm} tradeoffs has received little direct measurement.
 
 \textbf{Methodology.} We follow Hoefler and Belli's reporting guidance
-\cite{hoefler2015} and Tene's coordinated-omission critique \cite{tene}.
+\cite{hoefler2015}, Tene's coordinated-omission critique \cite{tene}, and take
+Mytkowicz et al.'s warning about invisible experimental bias
+\cite{mytkowicz2009} as standing orders --- Sec.~\ref{sec:method} documents
+two such biases we caught in our own instruments.
 
-\textbf{Gap.} We are not aware of a systematic MPMC characterization on
+\textbf{Gap.} We are not aware of a systematic MPMC queue characterization on
 asymmetric ARM client silicon under OS-controlled placement.
 
 \section{Queue Designs Under Study}
@@ -142,7 +178,12 @@ positions by CAS with unbounded individual retry. The \emph{FAA ticket} queue's
 claim is a single fetch-and-add (wait-free, no losers); its tickets are
 irrevocable, which makes completion blocking-on-slot and forbids a try-API ---
 our harness therefore terminates consumers with poison pills rather than
-shared counters.
+shared counters. To decompose causes rather than compare bundles of
+differences, we additionally build two \emph{single-variable controls}:
+\textsf{vyukov-b} (Vyukov plus exactly the ticket queue's 1024-spin-then-yield
+politeness in every retry path) and \textsf{casticket} (the ticket queue with
+its fetch-and-add claim replaced by a raw CAS-increment loop). Each control
+differs from its parent in one property only.
 
 \section{Methodology}
 \label{sec:method}
@@ -184,6 +225,13 @@ $10$--$30\times$. Explicitly resetting worker QoS
 comparisons survived only because interleaving demoted all arms equally.
 Absolute latencies in this paper cite v2 exclusively.
 
+\textbf{Instrumented builds.} Mechanism counters (per-operation CAS
+failures, cursor re-reads, slot-wait yields) are compiled only into a separate
+\emph{stats} binary used for the mechanism dataset (v3s); headline numbers come
+from uninstrumented builds, so the counters cannot perturb them
+\cite{mytkowicz2009}. Involuntary context switches are read from
+\texttt{getrusage} in all builds (no hot-path cost).
+
 \textbf{Thermal validity.} Median per-queue throughput varies by at most
 $\pm5\%$ across the eight trial rounds with no monotone decline
 (Fig.~\ref{fig:calib} shows the probe trace), indicating the
@@ -211,14 +259,14 @@ the only configuration where the comparison is legal.
 
 \subsection{Preemption: the progress-guarantee inversion (F1)}
 \begin{figure}[t]\centering
-\maybefig{fig_oversubscription}{0.9\linewidth}
+\maybefig[v3]{fig_oversubscription}{0.9\linewidth}
 \caption{Throughput at 4P:4C as thread counts are multiplied beyond the 8
-cores (log--log).}
+cores (log--log). Dashed lines: the single-variable control variants.}
 \label{fig:oversub}
 \end{figure}
 
 \begin{figure}[t]\centering
-\maybefig{fig_latency_tail}{\linewidth}
+\maybefig[v3]{fig_latency_tail}{\linewidth}
 \caption{Paced-load (1\,M\,msg/s) latency percentiles at 4P:4C, dedicated
 (left) vs $4\times$ oversubscribed (right), log scale.}
 \label{fig:tail}
@@ -226,17 +274,44 @@ cores (log--log).}
 
 We pre-registered the textbook prediction: the FAA queue's blocking-on-slot
 completion should degrade disproportionately under preemption, while lock-free
-designs degrade gracefully. The data inverted it
-(Fig.~\ref{fig:oversub}). From $\times1$ to $\times4$ oversubscription the
-FAA queue \emph{gained} 77\% (16.5$\,\to\,$29.2 Mops/s) while lock-free Vyukov
-lost 78\% (7.8$\,\to\,$1.7); the mutex lost 25\%, Michael--Scott 12\%. Tails
-told the same story (Fig.~\ref{fig:tail}): at $\times4$, FAA's p99.9 was
-15\,ms against 71--119\,ms for all alternatives. Our mechanism hypothesis:
-a preempted system turns CAS retry into a contention storm --- 32 runnable
-threads re-fighting two cursor cache lines, losers burning scheduler quanta ---
-whereas an FAA claim always succeeds, and each ticket holder then waits on its
-\emph{own} cell with a spin-then-yield loop that returns quanta to the
-scheduler.
+designs degrade gracefully. The data inverted it, in three independent full
+runs (Fig.~\ref{fig:oversub}): from $\times1$ to $\times4$ oversubscription
+the FAA queue \emph{gained} 77--94\% (v3: 16.5$\,\to\,$29.7 Mops/s) while
+lock-free Vyukov lost ${\sim}80\%$ (7.9$\,\to\,$1.7); the mutex lost 25\%,
+Michael--Scott 12\%. Tails told the same story (Fig.~\ref{fig:tail}): at
+$\times4$, the ticket designs' p99.9 was 14\,ms against 55--70\,ms for every
+alternative.
+
+\textbf{Attribution by controls (Table~\ref{tab:controls}).} The FAA queue
+differs from Vyukov in two properties at once, so we decompose with the
+single-variable variants. \textsf{vyukov-b} (adds yielding backoff) tracks
+plain Vyukov \emph{identically} --- throughput, tails, and E-core behavior ---
+eliminating spin policy as the cause. \textsf{casticket} (CAS claim, ticket
+completion) \emph{retains} the rising-under-oversubscription profile
+(7.1$\,\to\,$19.3) and the 14\,ms tail: the ticket/turn slot discipline, not
+the atomic primitive, prevents the collapse. The FAA primitive then
+contributes a further ${\sim}2\times$ throughput within that discipline (29.7
+vs 19.3 at $\times4$) --- consistent with the counters, which show
+\textsf{casticket} losing ${\sim}1.0$ claim-CAS per operation where FAA loses
+exactly zero.
+
+\begin{table}[t]
+\caption{The control decomposition (throughput, Mops/s, 4P:4C; tails at
+$\times4$). Each arm differs from a neighbor in exactly one property.}
+\label{tab:controls}
+\centering
+\small
+\begin{tabular}{@{}llrrr@{}}
+\toprule
+Arm & differs by & $\times1$ & $\times4$ & p99.9@$\times4$ \\
+\midrule
+Vyukov & --- & 7.9 & 1.7 & 68.7\,ms \\
+~+backoff & spin policy & 8.0 & 1.7 & 67.5\,ms \\
+CAS/ticket & completion & 7.1 & 19.3 & 14.1\,ms \\
+FAA/ticket & claim primitive & 16.5 & 29.7 & 14.2\,ms \\
+\bottomrule
+\end{tabular}
+\end{table}
 
 \begin{table}[t]
 \caption{The capacity control (throughput, Mops/s, 4P:4C, $\times4$
@@ -244,24 +319,41 @@ oversubscription). FAA's advantage requires slack.}
 \label{tab:capacity}
 \centering
 \small
-\begin{tabular}{@{}lrrrr@{}}
+\begin{tabular}{@{}lrrrrr@{}}
 \toprule
-Capacity & FAA & Vyukov & MS & mutex \\
+Capacity & FAA & CAS/tkt & Vyukov & MS & mutex \\
 \midrule
-64 & 2.6 & 1.1 & 5.3 & 4.7 \\
-1024 & \textbf{29.2} & 1.7 & 5.5 & 14.3 \\
-8192 & 20.4 & 2.4 & 5.3 & 15.6 \\
+64 & 2.6 & 2.6 & 0.9 & 5.3 & 4.5 \\
+1024 & \textbf{29.7} & 19.3 & 1.7 & 5.2 & 14.7 \\
+8192 & 19.2 & 8.4 & 2.4 & 5.3 & 15.9 \\
 \bottomrule
 \end{tabular}
 \end{table}
 
-The finding is capacity-conditional (Table~\ref{tab:capacity}): at capacity 64
-the FAA queue collapses to 2.6 Mops/s --- with little slack, a preempted ticket
-holder really does block its slot's successors, exactly as the taxonomy
-predicts. \emph{Wait-free claiming beats lock-free retry under preemption if
-and only if capacity absorbs scheduling gaps.} (Performance is also
-non-monotone in capacity --- 8192 is slower than 1024 --- consistent with a
-larger ring's cache footprint.)
+The finding is capacity-conditional (Table~\ref{tab:capacity}): at capacity
+64 \emph{both} ticket designs collapse to 2.6 Mops/s --- with little slack, a
+preempted ticket holder really does block its slot's successors, exactly as
+the taxonomy predicts. \emph{The slot discipline wins under preemption if and
+only if capacity absorbs scheduling gaps.} (Performance is non-monotone in
+capacity --- 8192 is slower than 1024 for both ticket designs --- consistent
+with a larger ring's cache footprint.)
+
+\subsection{The mechanism, measured}
+\begin{figure}[t]\centering
+\maybefig[v3s]{fig_mechanism}{\linewidth}
+\caption{Instrumented-build dataset: per-op retry/claim failures (left) and
+involuntary context switches per trial (right) vs oversubscription, log scales.}
+\label{fig:mech}
+\end{figure}
+The instrumented build turns the retry-storm hypothesis into measurement
+(Fig.~\ref{fig:mech}). Vyukov pays ${\sim}0.7$ failed cursor CASes \emph{plus}
+${\sim}1.8$ behind-the-cursor re-reads per operation --- every one a load or RMW
+on one of two shared cache lines --- while the ticket designs' secondary
+traffic is ${\sim}0.06$ per op (waits on \emph{private} cells). Context-switch
+counts rule out the quanta-hoarding explanation: the backoff variant yields
+(76.8k involuntary switches at $\times4$ vs raw Vyukov's 55.5k) yet collapses
+identically, and the fastest design (FAA) shows the \emph{most} preemptions
+(1.24M) --- switches are not the cost; wasted shared-line work is.
 
 \subsection{Core asymmetry: placement reorders the ranking (F2)}
 \begin{figure}[t]\centering
@@ -295,14 +387,22 @@ reclamation lag. Unbounded designs should be evaluated on a memory axis, not
 only a speed axis.
 
 \subsection{Fairness for free (F5)}
-The coefficient of variation of per-producer completed pushes measures
-producer starvation. FAA ticketing is near-perfectly fair everywhere
-(CoV $\le 0.008$, including $\times4$ oversubscription) --- FIFO tickets are
-fairness by construction. All other designs degrade under stress (4:4
-$\times4$: MS 0.14, Vyukov 0.12, moodycamel 0.13, mutex 0.08), and
-moodycamel is structurally unfair at producer-heavy dedicated shapes
-(CoV 0.18--0.19 at 6:2 and 7:1), consistent with its per-producer sub-queue
-architecture trading fairness for throughput.
+\begin{figure}[t]\centering
+\maybefig[v3]{fig_fairness}{\linewidth}
+\caption{Producer- and consumer-side fairness (CoV of per-thread completed
+operations) at 4P:4C, dedicated vs $4\times$ oversubscribed.}
+\label{fig:fair}
+\end{figure}
+The coefficient of variation of per-thread completed operations measures
+starvation on both sides (Fig.~\ref{fig:fair}). FAA ticketing is
+near-perfectly fair everywhere (producer CoV $\le 0.008$, including $\times4$
+oversubscription) --- FIFO tickets are fairness by construction, and the
+\textsf{casticket} control shows the property partially survives even a CAS
+claim (though its lost CASes translate into visibly higher spread). All other
+designs degrade under stress (4:4 $\times4$ producer CoV: MS 0.14, Vyukov
+0.12, moodycamel 0.13, mutex 0.08), and moodycamel is structurally unfair at
+producer-heavy dedicated shapes (CoV 0.18--0.19 at 6:2 and 7:1), consistent
+with its per-producer sub-queue architecture trading fairness for throughput.
 
 \subsection{Dedicated-core latency, and an incompatibility}
 On dedicated cores (post-confounder-fix, v2), median latencies are sub-2\,\textmu s
@@ -340,15 +440,18 @@ one-command experiment for anyone with such hardware.
 On an asymmetric, unpinnable, passively cooled client SoC, the textbook MPMC
 ranking failed three ways: the mutex won the dedicated-core middle; the
 design with the \emph{weakest} completion guarantee (FAA ticketing) was the
-most robust to both preemption and efficiency cores --- provided capacity
-absorbs scheduling gaps --- while the lock-free CAS design was the most
-fragile; and the unbounded lock-free queue's binding constraint was memory,
-not speed. The practical guidance is correspondingly conditional: on client
-silicon, choose FAA ticketing for preemption- and placement-robustness with
-adequate capacity, a mutex for simplicity at moderate mixed ratios, and treat
-1:1 microbenchmarks as advertising. More broadly: progress-guarantee
-taxonomy is not a performance model --- measurement under the deployment
-regime is.
+most robust to both preemption and efficiency cores, while the lock-free CAS
+design was the most fragile; and the unbounded lock-free queue's binding
+constraint was memory, not speed. The controlled decomposition sharpens the
+lesson: robustness lives in the ticket/turn \emph{slot discipline} (private-
+cell waiting, no shared-cursor retry), the FAA primitive multiplies throughput
+within it, and neither spin policy nor progress-guarantee class predicts the
+outcome --- all conditional on capacity absorbing scheduling gaps. Practical
+guidance: on client silicon choose ticket/turn designs (ideally FAA-claimed,
+adequately sized) for preemption- and placement-robustness, a mutex for
+simplicity at moderate mixed ratios, and treat 1:1 microbenchmarks as
+advertising. More broadly: progress-guarantee taxonomy is not a performance
+model --- measurement under the deployment regime, with controls, is.
 
 \section*{Artifact}
 Code, datasets (raw CSVs), and figure pipeline:
