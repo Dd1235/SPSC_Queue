@@ -1,0 +1,48 @@
+# Cross-platform directional check for the MPMC study (Sec. "Threats").
+# Manually triggered; each job runs a reduced matrix and uploads its CSV as an
+# artifact. Runners are few-core and virtualized -- the paper frames this data
+# as directional (does the oversubscription inversion reproduce off-M2?), never
+# as headline numbers.
+name: study-matrix
+
+on:
+  workflow_dispatch:
+
+jobs:
+  matrix:
+    name: ${{ matrix.label }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { os: macos-14, label: apple-silicon-m1 }   # Apple silicon VM (3-4 cores)
+          - { os: ubuntu-latest, label: x86-64 }        # x86 VM (4 vCPU)
+    steps:
+      - uses: actions/checkout@v4
+      - name: Record hardware
+        run: |
+          uname -a
+          sysctl -n hw.ncpu hw.perflevel0.logicalcpu hw.perflevel1.logicalcpu 2>/dev/null || nproc
+      - name: Configure
+        run: cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DSPSC_BENCH_THIRDPARTY=ON -DSPSC_BUILD_TESTS=OFF -DSPSC_BUILD_DEMOS=OFF
+      - name: Build
+        run: cmake --build build --target bench_mpmc -j
+      - name: Reduced matrix (2:2 base; x1/x4; cap 64/1024)
+        run: |
+          for trial in 0 1 2 3 4; do
+            for cap in 64 1024; do
+              for over in 1 4; do
+                for q in vyukov vyukov-b faa casticket mutex; do
+                  ./build/benchmarks/bench_mpmc --queue $q --producers 2 --consumers 2 \
+                    --oversubscribe $over --capacity $cap --seconds 1 --trial $trial \
+                    --csv ci_${{ matrix.label }}.csv || echo "FAIL $q cap=$cap x$over"
+                done
+              done
+            done
+          done
+          wc -l ci_${{ matrix.label }}.csv
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ci-${{ matrix.label }}
+          path: ci_${{ matrix.label }}.csv
