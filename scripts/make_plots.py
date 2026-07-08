@@ -230,12 +230,19 @@ def fig_mechanism(df, outdir, tag):
     base = df[(df["mode"] == "throughput") & (df.producers == 4) & (df.consumers == 4) &
               (df.qos == "none") & (df.capacity == 1024)]
     fig, axes = plt.subplots(1, 2, figsize=(6.8, 2.6))
+    zero_arms = []
     for q in queues_present(base):
         rows = agg(base[base.queue == q], "retries_per_op").sort_values("oversubscribe")
         if rows["median"].max() > 0:
             axes[0].plot(rows.oversubscribe, rows["median"].clip(lower=1e-3),
                          color=COLOR[q], label=LABEL[q], marker="o", markersize=3,
                          linestyle="--" if q in DASH else "-", linewidth=1.5)
+        elif q in ("faa",):  # zero retries IS the finding -- annotate, don't hide
+            zero_arms.append(q)
+    for q in zero_arms:
+        axes[0].annotate(f"{LABEL[q]}: 0 retries/op (exact)", xy=(0.03, 0.04),
+                         xycoords="axes fraction", fontsize=6.5, color=COLOR[q],
+                         fontweight="bold")
     axes[0].set_yscale("log")
     axes[0].set_xscale("log", base=2)
     axes[0].set_xticks([1, 2, 4]); axes[0].set_xticklabels(["x1", "x2", "x4"])
@@ -246,8 +253,9 @@ def fig_mechanism(df, outdir, tag):
     for q in queues_present(base):
         rows = agg(base[base.queue == q], "ivcsw").sort_values("oversubscribe")
         axes[1].plot(rows.oversubscribe, rows["median"].clip(lower=1),
-                     color=COLOR[q], marker="o", markersize=3,
+                     color=COLOR[q], label=LABEL[q], marker="o", markersize=3,
                      linestyle="--" if q in DASH else "-", linewidth=1.5)
+    axes[1].legend(fontsize=5, frameon=False, ncol=2)
     axes[1].set_yscale("log")
     axes[1].set_xscale("log", base=2)
     axes[1].set_xticks([1, 2, 4]); axes[1].set_xticklabels(["x1", "x2", "x4"])

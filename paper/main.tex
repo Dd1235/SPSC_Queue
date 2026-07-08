@@ -5,8 +5,10 @@
 % with AI assistance. Before any submission the human author must verify every
 % claim against paper/notes/claims.md and the data in paper/data/, rewrite the
 % prose in their own voice, and check the venue's AI-disclosure policy.
-% Every number below is traceable: paper/data/matrix_v2.csv (canonical, k=8)
-% and matrix_v1.csv (replication check); aggregation = scripts/make_plots.py.
+% Every number below is traceable: matrix_v2.csv (full matrix, k=8),
+% matrix_v3.csv (focus matrix with control arms, k=8), matrix_v3s.csv
+% (instrumented mechanism dataset), matrix_v1.csv (first replication);
+% aggregation = scripts/make_plots.py; claim->data map = notes/claims.md.
 \documentclass[conference]{IEEEtran}
 
 \usepackage{graphicx}
@@ -405,11 +407,16 @@ producer-heavy dedicated shapes (CoV 0.18--0.19 at 6:2 and 7:1), consistent
 with its per-producer sub-queue architecture trading fairness for throughput.
 
 \subsection{Dedicated-core latency, and an incompatibility}
-On dedicated cores (post-confounder-fix, v2), median latencies are sub-2\,\textmu s
-for all designs (FAA best at 333\,ns; the mutex worst at 1.75\,\textmu s with
-p99 of 44\,\textmu s vs 5--12\,\textmu s for the rest); p99.9 spans only
-${\sim}2\times$ across designs (MS best at 272\,\textmu s). Preemption, not
-the dedicated case, is what separates the designs. Separately, moodycamel
+On dedicated cores (post-confounder-fix), median latencies are
+sub-2\,\textmu s for all designs (FAA best at 333\,ns; the mutex worst at
+1.75\,\textmu s with p99 of 44\,\textmu s vs 5--12\,\textmu s for the rest).
+Dedicated-core p99.9 splits by family: the array/ticket designs stay sub-
+millisecond in every run (v3: Vyukov ${<}0.05$, casticket 0.2, FAA
+0.6\,ms), while Michael--Scott and the mutex show run-\emph{variable}
+multi-millisecond tails (0.27/0.39\,ms in one full run, 8.2/6.1\,ms in
+another) --- consistent with reclamation maintenance bursts and lock convoys
+being scheduler-timing-dependent. Preemption, not the dedicated case, is what
+separates the designs decisively. Separately, moodycamel
 exceeded a 120\,s timeout in 7 of 8 rounds at capacity 64 under $\times4$
 oversubscription (wedged in the drain phase); we report this as a
 configuration incompatibility rather than scoring it.
@@ -431,7 +438,7 @@ micro-optimized to each design's best-known form; the industrial reference
 arm bounds that gap. Apple's memory subsystem is undocumented, so mechanism
 explanations are stated as hypotheses consistent with the data
 (``consistent with,'' never ``because''). The FAA design's throughput gain
-under oversubscription, while replicated across two full runs and
+under oversubscription, while replicated across three full runs and
 capacity-controlled, deserves confirmation on other asymmetric parts
 (e.g., Intel hybrid, other Apple generations) --- our artifact makes this a
 one-command experiment for anyone with such hardware.
