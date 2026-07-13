@@ -33,6 +33,18 @@ QUEUES = ["ms", "vyukov", "vyukov-b", "faa", "casticket", "mutex", "moody"]  # +
 
 def shapes(smoke: bool, focus: str = ""):
     """Yield dicts of shape parameters (everything except queue + trial)."""
+    if focus == "h3":
+        # F8 reclamation A/B/C: the RSS-pathology ratios, dedicated cores.
+        for pc in ((1, 1), (4, 4), (1, 7), (2, 6)):
+            yield dict(mode="throughput", producers=pc[0], consumers=pc[1],
+                       oversubscribe=1, qos="none")
+        return
+    if focus == "load":
+        # F9: latency-vs-offered-load curves (saturation knees), 4P:4C x1.
+        for rate in (250_000, 500_000, 1_000_000, 2_000_000, 4_000_000):
+            yield dict(mode="latency", producers=4, consumers=4, oversubscribe=1,
+                       qos="none", rate=rate)
+        return
     if focus == "h1":
         # The F1-attribution subset: oversubscription sweep + capacity control +
         # the 1:1/2:2 cliff + P/E extremes + paced tails. ~8 arms x 12 shapes.
@@ -118,8 +130,8 @@ def main():
     ap.add_argument("--timeout", type=float, default=120.0)
     ap.add_argument("--queues", default=",".join(QUEUES))
     ap.add_argument("--smoke", action="store_true", help="tiny matrix for pipeline testing")
-    ap.add_argument("--focus", default="", choices=["", "h1"],
-                    help="named shape subset (h1 = F1-attribution set)")
+    ap.add_argument("--focus", default="", choices=["", "h1", "h3", "load"],
+                    help="named shape subset (h1/h3/load)")
     args = ap.parse_args()
 
     bench = Path(args.bench)
