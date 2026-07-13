@@ -268,6 +268,74 @@ def fig_mechanism(df, outdir, tag):
     plt.close(fig)
 
 
+def fig_ebrfix(df, outdir, tag):
+    """F8 A/B/C: peak RSS (log) and throughput across ratios, ms modes+mutex."""
+    base = df[(df["mode"] == "throughput") & (df.oversubscribe == 1) & (df.qos == "none")]
+    base = base.copy()
+    base["ratio"] = base.producers.astype(str) + ":" + base.consumers.astype(str)
+    ratios = [r for r in ["1:1", "4:4", "2:6", "1:7"] if r in set(base.ratio)]
+    labels = {"ms": "legacy", "ms-fix": "prefix fix", "ms-retry": "retry variant",
+              "mutex": "mutex (bounded ref)"}
+    colors = {"ms": "#2a78d6", "ms-fix": "#008300", "ms-retry": "#e34948",
+              "mutex": "#9aa3b2"}
+    hatches = {"ms-fix": None, "ms-retry": "//", "ms": None, "mutex": None}
+    fig, axes = plt.subplots(1, 2, figsize=(6.8, 2.6))
+    for ax, col, ylabel, logy in ((axes[0], "peak_rss_mb", "peak RSS (MB, log)", True),
+                                  (axes[1], "throughput_mops", "throughput (Mops/s)", False)):
+        d = base[base.ratio.isin(ratios)]
+        sub = d[d.trial > 0].groupby(["ratio", "queue"])[col]
+        med = sub.median().reset_index()
+        qs = [q for q in ["ms", "ms-fix", "ms-retry", "mutex"] if q in set(med.queue)]
+        width = min(0.8 / max(len(qs), 1), 0.2)
+        for i, q in enumerate(qs):
+            rows = med[med.queue == q].set_index("ratio")
+            xs, ys = [], []
+            for j, rt in enumerate(ratios):
+                if rt in rows.index:
+                    xs.append(j + (i - (len(qs) - 1) / 2) * width)
+                    ys.append(max(rows.loc[rt, col], 0.5) if logy else rows.loc[rt, col])
+            ax.bar(xs, ys, width * 0.9, color=colors[q], label=labels[q],
+                   edgecolor="white", linewidth=0.6, hatch=hatches.get(q))
+        ax.set_xticks(range(len(ratios)))
+        ax.set_xticklabels(ratios)
+        ax.set_ylabel(ylabel)
+        ax.set_xlabel("producers : consumers")
+        if logy:
+            ax.set_yscale("log")
+    axes[0].legend(fontsize=6, frameon=False)
+    fig.tight_layout()
+    for ext in ("pdf", "png"):
+        fig.savefig(outdir / f"fig_ebrfix_{tag}.{ext}")
+    plt.close(fig)
+
+
+def fig_loadcurve(df, outdir, tag):
+    """F9: p99 latency vs offered load; points only below saturation (>=95%
+    delivered); saturated points annotated by absence."""
+    base = df[(df["mode"] == "latency") & (df.trial > 0)].copy()
+    base["delivered_frac"] = base.ops / (base.rate * base.seconds)
+    fig, ax = plt.subplots(figsize=(4.2, 2.8))
+    for q in queues_present(base):
+        d = base[base.queue == q]
+        med = d.groupby("rate").agg(p99=("p99_ns", "median"),
+                                    frac=("delivered_frac", "median")).reset_index()
+        ok = med[med.frac >= 0.95].sort_values("rate")
+        if len(ok):
+            ax.plot(ok.rate / 1e6, ok.p99 / 1000, color=COLOR[q], label=LABEL[q],
+                    marker="o", markersize=3.5, linewidth=1.5,
+                    linestyle="--" if q in DASH else "-")
+    ax.set_xscale("log")
+    ax.set_yscale("log")
+    ax.set_xlabel("offered load (M msg/s, log)")
+    ax.set_ylabel("p99 latency (us, log)")
+    ax.set_title("points shown only below saturation (>=95% delivered)", fontsize=7.5)
+    ax.legend(fontsize=6, frameon=False)
+    fig.tight_layout()
+    for ext in ("pdf", "png"):
+        fig.savefig(outdir / f"fig_loadcurve_{tag}.{ext}")
+    plt.close(fig)
+
+
 def md_table(piv):
     """Markdown-render a pivot table without the optional tabulate dependency."""
     cols = list(piv.columns)
@@ -325,6 +393,10 @@ def main():
     fig_calib(df, assets, args.tag)
     if "cons_cov" in df.columns:
         fig_fairness(df, assets, args.tag)
+    if set(df.queue) & {"ms-fix", "ms-retry"}:
+        fig_ebrfix(df, assets, args.tag)
+    if (df["mode"] == "latency").any() and df[df["mode"] == "latency"].rate.nunique() >= 3:
+        fig_loadcurve(df, assets, args.tag)
     if "retries_per_op" in df.columns and df.retries_per_op.max() > 0:
         fig_mechanism(df, assets, args.tag)
     write_summary(df, data_dir, args.tag)
