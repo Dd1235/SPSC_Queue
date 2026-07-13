@@ -25,6 +25,28 @@
 //     never corrupts. This is the well-known EBR tradeoff vs hazard pointers.
 //   - Threads that exit with unreclaimed nodes hand them to a mutex-protected
 //     orphan list (cold path only).
+//
+// REMEDIATION STUDY (paper finding F8) -- three runtime-selectable modes so
+// one binary A/B/Cs them honestly (set_reclaim_mode, default kLegacy):
+//
+//   kLegacy  -- the study's original code: one advance attempt per maintenance
+//               and an O(limbo) compaction pass to free expired entries.
+//               Measured pathology: 742 MB peak RSS at 1P:7C in 2 s.
+//   kPrefix  -- THE FIX, and it is embarrassingly small: per-thread limbo
+//               epochs are nondecreasing, so expired entries form a prefix;
+//               free until the first survivor and erase once -- O(freed).
+//               Root cause insight: the "advancement starvation" we measured
+//               was really a COST FEEDBACK LOOP -- O(limbo) maintenance
+//               lengthened pins, which made all-aligned scan instants rarer,
+//               which grew limbo, which made maintenance slower still. Cheap
+//               reclamation breaks the loop; natural advancement then
+//               suffices.
+//   kRetry   -- the "obvious" heavier remediation (defer maintenance past the
+//               unpin + retry advancement until two successes + amortized
+//               pin-path advances). Kept because it measurably BACKFIRES
+//               (registry-scan coherence traffic taxes every pin/unpin) --
+//               a negative result the paper reports.
+//
 #pragma once
 
 #include <atomic>
@@ -37,8 +59,11 @@
 namespace mpmc::ebr {
 
 inline constexpr std::size_t kMaxThreads = 32;
-inline constexpr std::size_t kRetireThreshold = 64;  // maintenance cadence
+inline constexpr std::size_t kRetireThreshold = 64;   // maintenance cadence
+inline constexpr std::size_t kLimboHighWater = 4096;  // kRetry pressure trigger
 inline constexpr std::uint64_t kIdle = ~0ull;
+
+enum ReclaimMode : int { kLegacy = 0, kPrefix = 1, kRetry = 2 };
 
 namespace detail {
 
@@ -55,6 +80,7 @@ struct Retired {
 
 struct Domain {
     std::atomic<std::uint64_t> globalEpoch{0};
+    std::atomic<int> reclaimMode{kLegacy};  // see header: kLegacy/kPrefix/kRetry
     Slot slots[kMaxThreads];
     std::mutex orphanMu;           // cold path: thread exit + orphan drain
     std::vector<Retired> orphans;  // guarded by orphanMu
@@ -83,6 +109,8 @@ struct ThreadCtx {
     Domain& dom = Domain::instance();
     std::size_t slotIdx = kMaxThreads;
     int pinDepth = 0;
+    std::uint64_t pinCount = 0;
+    bool maintainPending = false;  // remediation: run maintain() after unpin
     std::vector<Retired> limbo;
     std::size_t sinceMaintain = 0;
 
@@ -111,10 +139,8 @@ struct ThreadCtx {
         }
     }
 
-    void maintain() {
-        dom.try_advance();
-        const std::uint64_t e = dom.globalEpoch.load(std::memory_order_acquire);
-        // Free everything retired two or more epochs ago.
+    // kLegacy: the study's original O(limbo) compaction free.
+    void free_expired_legacy(std::uint64_t e) {
         std::size_t kept = 0;
         for (std::size_t i = 0; i < limbo.size(); ++i) {
             if (limbo[i].epoch + 2 <= e) {
@@ -124,7 +150,45 @@ struct ThreadCtx {
             }
         }
         limbo.resize(kept);
+    }
+
+    // kPrefix/kRetry: limbo epochs are nondecreasing (stamped at retire time),
+    // so expired entries form a PREFIX -- free until the first survivor and
+    // erase once. O(freed), not O(limbo): this is what breaks the feedback
+    // loop.
+    void free_expired_prefix(std::uint64_t e) {
+        std::size_t i = 0;
+        while (i < limbo.size() && limbo[i].epoch + 2 <= e) {
+            limbo[i].deleter(limbo[i].ptr);
+            ++i;
+        }
+        if (i > 0) limbo.erase(limbo.begin(), limbo.begin() + static_cast<std::ptrdiff_t>(i));
+    }
+
+    void free_expired(std::uint64_t e) {
+        if (dom.reclaimMode.load(std::memory_order_relaxed) == kLegacy)
+            free_expired_legacy(e);
+        else
+            free_expired_prefix(e);
+    }
+
+    void maintain() {
+        const int mode = dom.reclaimMode.load(std::memory_order_relaxed);
+        if (mode == kRetry && limbo.size() > kLimboHighWater) {
+            // The heavy variant (kept as a measured negative result): retry
+            // the advance until two succeed so this batch becomes freeable.
+            int advanced = 0;
+            for (int i = 0; i < 64 && advanced < 2; ++i) {
+                if (dom.try_advance()) ++advanced;
+                for (volatile int spin = 0; spin < 64; ++spin) {
+                }
+            }
+        } else {
+            dom.try_advance();  // one attempt (kLegacy and kPrefix)
+        }
+        free_expired(dom.globalEpoch.load(std::memory_order_acquire));
         // Opportunistically drain orphans without ever blocking the hot path.
+        const std::uint64_t e = dom.globalEpoch.load(std::memory_order_acquire);
         if (dom.orphanMu.try_lock()) {
             std::lock_guard<std::mutex> g(dom.orphanMu, std::adopt_lock);
             std::size_t okept = 0;
@@ -158,11 +222,24 @@ public:
             // an epoch that just advanced is safe -- merely conservative.
             const std::uint64_t e = ctx_.dom.globalEpoch.load(std::memory_order_seq_cst);
             ctx_.dom.slots[ctx_.slotIdx].epoch.store(e, std::memory_order_seq_cst);
+            // Remediation (F8), amortized half: an occasional advance attempt
+            // from the pin path keeps the epoch moving even when no thread is
+            // retiring often enough to hit its maintenance threshold.
+            if (ctx_.dom.reclaimMode.load(std::memory_order_relaxed) == kRetry &&
+                (++ctx_.pinCount & 255u) == 0)
+                ctx_.dom.try_advance();
         }
     }
     ~Guard() {
-        if (--ctx_.pinDepth == 0)
+        if (--ctx_.pinDepth == 0) {
             ctx_.dom.slots[ctx_.slotIdx].epoch.store(kIdle, std::memory_order_release);
+            if (ctx_.maintainPending) {
+                // Remediation (F8): maintain UNPINNED, so try_advance is not
+                // blocked by our own epoch pin and can move multiple steps.
+                ctx_.maintainPending = false;
+                ctx_.maintain();
+            }
+        }
     }
     Guard(const Guard&) = delete;
     Guard& operator=(const Guard&) = delete;
@@ -171,6 +248,13 @@ private:
     detail::ThreadCtx& ctx_;
 };
 
+// Select the reclamation mode for the F8 experiment (see header comment):
+// 0 = kLegacy (original), 1 = kPrefix (the fix), 2 = kRetry (heavy variant,
+// measured to backfire). Set before threads start operating.
+inline void set_reclaim_mode(int mode) {
+    detail::Domain::instance().reclaimMode.store(mode, std::memory_order_relaxed);
+}
+
 // Defer destruction of `p` until it is provably unreachable (epoch + 2).
 template <class T> inline void retire(T* p) {
     detail::ThreadCtx& ctx = detail::tls();
@@ -178,7 +262,11 @@ template <class T> inline void retire(T* p) {
     ctx.limbo.push_back({p, [](void* q) { delete static_cast<T*>(q); }, e});
     if (++ctx.sinceMaintain >= kRetireThreshold) {
         ctx.sinceMaintain = 0;
-        ctx.maintain();
+        if (ctx.dom.reclaimMode.load(std::memory_order_relaxed) == kRetry) {
+            ctx.maintainPending = true;  // kRetry: defer past our unpin
+        } else {
+            ctx.maintain();  // kLegacy/kPrefix: maintain inline
+        }
     }
 }
 
