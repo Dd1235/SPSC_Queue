@@ -99,6 +99,32 @@ robustness comes from the ticket/turn slot discipline; the FAA primitive is a
 ~2x throughput multiplier within it; progress-guarantee class and spin policy
 predict nothing.* v3 is also the third replication of F1/F2/F3 headline shapes.
 
+## F8 — the reclamation remediation (matrix_h3, k=8; 2026-07-13)
+
+Three-way A/B/C at the pathological shapes (RSS MB medians | throughput Mops/s):
+
+| ratio | legacy | prefix fix | retry variant | verdict |
+|---|---|---|---|---|
+| 1:7 | 626 \| 5.4 | **153 \| 9.4** | 717 \| 2.6 | fix: RSS −76%, throughput +76% |
+| 2:6 | 536 \| 7.0 | **97 \| 8.9** | 771 \| 3.5 | fix: RSS −82%, throughput +28% |
+| 4:4 | 24 \| 6.3 | 11 \| 5.5 | 165 \| 5.5 | fix: RSS −52%, throughput −13% |
+| 1:1 | 541 \| 11.8 | 526 \| 11.3 | 552 \| 11.9 | **no RSS change — see boundary** |
+
+- **The fix** (O(freed) prefix reclamation; valid because per-thread retire
+  epochs are nondecreasing) resolves the consumer-heavy pathology by breaking
+  the cost feedback loop: O(limbo) maintenance → longer pins → rarer aligned
+  instants → stuck epoch → bigger limbo.
+- **Two failed attempts documented** (kept as the measured `ms-retry` arm):
+  retrying advancement while self-pinned is doomed (the epoch cannot pass your
+  own pin twice), and heavy retry machinery taxes every pin via registry-scan
+  coherence traffic — worse on BOTH axes at every consumer-heavy shape.
+- **Boundary (honest scope):** at 1:1 the backlog persists (~530 MB) — with a
+  single retiring thread, reclamation is advance-ATTEMPT-RATE-bound, not
+  cost-bound. Fixing that needs attempts from non-retiring threads
+  (producer-side/amortized advance) — stated as future work, not claimed.
+- Legacy bimodality confirmed at 4:4 (min 15 / max 56 MB) consistent with the
+  tipping-point dynamic.
+
 **Phase F remaining:** (1) ~~results prose~~ DONE 2026-07-07 (main.tex fully drafted from v2); (2) ARTIFACT.md; (3) venue deadline check; (4) human rewrite pass; (5) optional: fairness figure for F5, cross-machine invitation via artifact.
 
 ### Appendix: QoS table (throughput Mops/s, 4P:4C, ×1, matrix v1 medians)
