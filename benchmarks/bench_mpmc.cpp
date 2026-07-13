@@ -466,10 +466,16 @@ int main(int argc, char** argv) {
     rusage ru0{};
     getrusage(RUSAGE_SELF, &ru0);
     Result r;
-    if (cfg.queue == "ms")
+    if (cfg.queue == "ms") {
         r = dispatch_mode<MSAdapter>(cfg);
-    else if (cfg.queue == "vyukov")
-        r = dispatch_mode<VyukovAdapter>(cfg);
+    } else if (cfg.queue == "ms-fix") {  // F8: prefix-reclaim fix
+        mpmc::ebr::set_reclaim_mode(1);
+        r = dispatch_mode<MSAdapter>(cfg);
+    } else if (cfg.queue == "ms-retry") {  // F8: heavy variant (negative result)
+        mpmc::ebr::set_reclaim_mode(2);
+        r = dispatch_mode<MSAdapter>(cfg);
+    } else if (cfg.queue == "vyukov")
+        r = dispatch_mode<VyukovAdapter>(cfg);  // NOLINT
     else if (cfg.queue == "vyukov-b")
         r = dispatch_mode<VyukovBackoffAdapter>(cfg);
     else if (cfg.queue == "faa")
@@ -495,7 +501,7 @@ int main(int argc, char** argv) {
     r.vcsw = ru1.ru_nvcsw - ru0.ru_nvcsw;     // voluntary (yields that slept)
     r.ivcsw = ru1.ru_nivcsw - ru0.ru_nivcsw;  // involuntary (preemptions)
 
-    if (cfg.queue == "ms") mpmc::ebr::flush_all_unsafe();
+    if (cfg.queue.rfind("ms", 0) == 0) mpmc::ebr::flush_all_unsafe();
 
     std::printf("%s %s P=%d C=%d x%d cap=%zu qos=%s: %.2f Mops/s (%" PRIu64 " ops / %.2fs)",
                 cfg.queue.c_str(), cfg.mode.c_str(), cfg.producers, cfg.consumers,
