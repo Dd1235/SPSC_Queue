@@ -133,6 +133,9 @@ int main() {
     test_fifo_and_empty<mpmc::MSQueue<int>>();
     test_interleaved<mpmc::MSQueue<int>>();
     test_ms_lifetime();
+    mpmc::ebr::set_reclaim_mode(1);  // F8 fix: lifetime must stay exact
+    test_ms_lifetime();
+    mpmc::ebr::set_reclaim_mode(0);
 
     test_fifo_and_empty<mpmc::VyukovQueue<int>>();
     test_interleaved<mpmc::VyukovQueue<int>>();

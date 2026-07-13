@@ -159,6 +159,15 @@ int main() {
     CHECK((run_stress<VB>(4, 4, 30'000, 64)));
     CHECK((run_stress<VB>(2, 2, 60'000, 1024)));
 
+    // F8 reclamation modes: the same MS invariants must hold under the
+    // prefix fix (mode 1) and the heavy retry variant (mode 2).
+    mpmc::ebr::set_reclaim_mode(1);
+    CHECK((run_stress<MS>(1, 7, 120'000, 1024)));
+    CHECK((run_stress<MS>(4, 4, 30'000, 1024)));
+    mpmc::ebr::set_reclaim_mode(2);
+    CHECK((run_stress<MS>(1, 7, 120'000, 1024)));
+    mpmc::ebr::set_reclaim_mode(0);
+
     mpmc::ebr::flush_all_unsafe();
     return TEST_SUMMARY();
 }
