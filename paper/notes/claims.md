@@ -192,6 +192,53 @@ symmetrically (dataset_utils + run_matrix documented skip); its
 exact-accounting curve ends at 6M, unsaturated. The hardened invariant turned
 a silently biased tail into a loud, documented exclusion.
 
+## F10 — industrial ticket queue: wait policy is existential (matrix_ind, k=8; 2026-07-16)
+
+rigtorp::MPMCQueue = independently engineered FAA-ticket/turn queue whose slot
+waits BUSY-SPIN (ours spin-1024-then-yield). Same structure, different wait
+policy (medians, cap 1024):
+
+| shape | faa | rigtorp | verdict |
+|---|---|---|---|
+| 1:1 ×1 | 125.6 | 120.3 | structures agree at low contention (−4%) |
+| 4:4 ×1 | 16.4 | 9.6 | busy-spin −41% even on dedicated cores |
+| 4:4 ×2 | 19.2 | 0.12 | collapse |
+| 4:4 ×4 | **29.6** | **0.04** | 700× apart; rigtorp worse than Vyukov (1.66) |
+| paced 1M ×1 p50 | 0.4 µs | 0.4 µs | below saturation they match |
+| paced 1M ×4 p50 | 0.9 ms | **25.7 s** | can't sustain 1M offered at ×4 |
+
+**Verdict: interaction, not main effects.** vyukov-b showed politeness is
+irrelevant in the CAS-retry structure; rigtorp shows it is EXISTENTIAL in the
+ticket structure — irrevocable tickets mean only yielding waiters let a
+preempted claimant complete its turn. Slot discipline + yielding waits =
+robust; slot discipline + busy spin = worst arm measured; shared-cursor retry
+± politeness = mediocre either way. Neither structure nor policy alone
+predicts. (Fairness to rigtorp: its docs target low-latency low-contention
+use; our 375 ns paced p50 confirms that regime.)
+
+## F11 — reclamation-scheme cross-check: HP doesn't save unboundedness (matrix_ind, k=8)
+
+xenium michael_scott_queue + hazard_pointer (bounded garbage by construction)
+vs our MS+EBR-legacy, same rounds:
+
+| shape | ms (EBR) RSS | xenium (HP) RSS | ms tput | xenium tput |
+|---|---|---|---|---|
+| 1:1 | 653 | 421 | 11.10 | 11.34 |
+| 2:6 | 662 | 548 | 5.85 | 3.32 |
+| 1:7 | 944 | **760** | 4.75 | 2.60 |
+
+- **The memory failure mode survives a scheme swap.** HP bounds garbage to
+  O(threads×K+batch), so ~760 MB at 1:7 must be dominated by LIVE nodes —
+  independent confirmation of F8-M's conclusion that unboundedness + rate
+  mismatch, not reclamation mechanics, is first-order. (Our prefix fix's
+  153–227 MB at 1:7 remains the best MS result; the fixable part was
+  EBR-specific, the floor is not.)
+- **HP's per-traversal cost lands on consumers:** throughput parity at 1:1
+  (+2%), −43% at 1:7 — cost grows with consumer parallelism, the textbook
+  HP-vs-EBR tradeoff measured on client silicon (Hart et al. one level down).
+- Bonus corner: at cap64 ×4 the unbounded arms win (ms 4.94, xenium 3.64 vs
+  faa 2.46, mutex 4.54, vyukov 0.88) — no backpressure to fight.
+
 **Phase F remaining:** (1) ~~results prose~~ DONE 2026-07-07 (main.tex fully drafted from v2); (2) ARTIFACT.md; (3) venue deadline check; (4) human rewrite pass; (5) optional: fairness figure for F5, cross-machine invitation via artifact.
 
 ### Appendix: QoS table (throughput Mops/s, 4P:4C, ×1, matrix v1 medians)

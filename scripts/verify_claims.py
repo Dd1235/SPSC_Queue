@@ -349,6 +349,56 @@ def run_checks():
        selections['matrix_load2'].excluded_known_rows,
        committed_tol=0, replication_tol=0)
 
+    # -- F10/F11: industrial cross-checks (matrix_ind) --
+    def ind(value='throughput_mops', **kw):
+        return med('matrix_ind', value=value, qos='none', **kw)
+
+    t11 = ind(mode='throughput', producers=1, consumers=1, oversubscribe=1,
+              capacity=1024)
+    t44 = {o: ind(mode='throughput', producers=4, consumers=4, oversubscribe=o,
+                  capacity=1024) for o in (1, 2, 4)}
+    ck('F10 rigtorp matches faa at 1:1 (within 10%)', 1,
+       float(abs(t11['rigtorp'] / t11['faa'] - 1) < 0.10),
+       committed_tol=0, replication_tol=0)
+    ck('F10 rigtorp 1:1=120.3', 120.3, t11['rigtorp'], replication_tol=0.15)
+    ck('F10 rigtorp x4 collapse: faa/rigtorp ~700x', 700,
+       t44[4]['faa'] / t44[4]['rigtorp'], committed_tol=0.10,
+       replication_tol=0.90)
+    ck('F10 rigtorp below vyukov at x4', 1,
+       float(t44[4]['rigtorp'] < t44[4]['vyukov']),
+       committed_tol=0, replication_tol=0)
+    lat1 = ind(value='p50_ns', mode='latency', producers=4, consumers=4,
+               oversubscribe=1, capacity=1024, rate=1_000_000)
+    lat4 = ind(value='p50_ns', mode='latency', producers=4, consumers=4,
+               oversubscribe=4, capacity=1024, rate=1_000_000)
+    ck('F10 rigtorp paced x1 p50 sub-us (matches faa)', 1,
+       float(lat1['rigtorp'] < 1000 and lat1['faa'] < 1000),
+       committed_tol=0, replication_tol=0)
+    ck('F10 rigtorp paced x4 p50=25.7s backlog', 25.7,
+       lat4['rigtorp'] / 1e9, replication_tol=0.50)
+
+    rss = {pc: ind(value='peak_rss_mb', mode='throughput', producers=pc[0],
+                   consumers=pc[1], oversubscribe=1, capacity=1024)
+           for pc in ((1, 1), (2, 6), (1, 7))}
+    ck('F11 xenium HP RSS at 1:7=760MB', 760, rss[(1, 7)]['xenium'],
+       replication_tol=0.40)
+    ck('F11 memory failure survives scheme swap (HP >= 100x mutex, all shapes)',
+       1, float(all(rss[pc]['xenium'] >= 100 * rss[pc]['mutex']
+                    for pc in rss)), committed_tol=0, replication_tol=0)
+    tp17 = ind(mode='throughput', producers=1, consumers=7, oversubscribe=1,
+               capacity=1024)
+    ck('F11 HP throughput parity at 1:1 (within 10%)', 1,
+       float(abs(t11['xenium'] / t11['ms'] - 1) < 0.10),
+       committed_tol=0, replication_tol=0)
+    ck('F11 HP cost at 1:7 = -43% vs EBR', 43,
+       100 * (1 - tp17['xenium'] / tp17['ms']), replication_tol=0.40)
+    t44c64 = ind(mode='throughput', producers=4, consumers=4, oversubscribe=4,
+                 capacity=64)
+    ck('F11 unbounded arms lead the cap64 x4 corner', 1,
+       float(t44c64['ms'] > t44c64['faa'] and
+             t44c64['xenium'] > t44c64['faa']),
+       committed_tol=0, replication_tol=0)
+
     calib_rows = dataset('matrix_v2')
     calib = calib_rows[calib_rows.trial > 0].groupby('queue').calib_ns.median()
     ck('v2 queue-wise calibration spread=1.6%', 1.6,
