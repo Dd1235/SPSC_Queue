@@ -14,14 +14,18 @@
 //   - COMPLETION is blocking-on-slot: tickets are irrevocable, so a claimant
 //     preempted between claim and publish blocks the thread whose ticket maps
 //     to the same slot next (and, transitively, FIFO successors). Under
-//     dedicated cores this is invisible; under oversubscription it is the
-//     mechanism we expect to blow up tail latency (paper hypothesis H1).
+//     oversubscription this was the paper's a priori vulnerability hypothesis.
+//     The capacity-1024 result inverted that prediction; capacity 64 exposed
+//     the predicted stall, so the paper reports a conditional boundary.
 //
 // Because tickets cannot be un-taken, there is no honest try_push/try_pop:
 // push() blocks while full, pop() blocks while empty (spin, then yield).
 // Harness/tests terminate consumers with poison-pill values, never by racing a
 // counter. Bounded, array-backed -> no reclamation problem. Capacity rounds up
-// to a power of two.
+// to a power of two; zero and unrepresentable sizes are rejected. For the same
+// irrevocable-ticket reason, payload construction on push and move assignment
+// on pop must not throw; the relevant API member enforces that requirement when
+// instantiated.
 //
 // CONTROL VARIANT (the study's F1-attribution experiment): CasClaim=true takes
 // tickets with a CAS-increment retry loop instead of fetch_add, keeping
@@ -29,13 +33,18 @@
 // blocking-on-slot completion, same spin-then-yield waits). Comparing
 // FAAQueue<T,false> vs FAAQueue<T,true> under oversubscription isolates the
 // claim primitive; comparing Vyukov vs Vyukov<Backoff> isolates spin policy.
+// These are within-parent controls, not a single-variable bridge between the
+// ticket/turn and Vyukov cell protocols.
 #pragma once
 
 #include <atomic>
 #include <cstddef>
 #include <cstdint>
+#include <limits>
 #include <new>
+#include <stdexcept>
 #include <thread>
+#include <type_traits>
 #include <utility>
 
 namespace mpmc {
@@ -47,9 +56,17 @@ template <class T, bool CasClaim = false> class FAAQueue {
         T* value() { return std::launder(reinterpret_cast<T*>(storage)); }
     };
 
-    static std::size_t next_pow2(std::size_t v) {
+    static std::size_t checked_capacity(std::size_t v) {
+        if (v == 0) throw std::invalid_argument("FAAQueue capacity must be positive");
+        if (v < 2) v = 2;
+
+        constexpr std::size_t max = std::numeric_limits<std::size_t>::max();
         std::size_t p = 1;
-        while (p < v) p <<= 1;
+        while (p < v) {
+            if (p > max / 2) throw std::length_error("FAAQueue capacity is too large");
+            p <<= 1;
+        }
+        if (p > max / sizeof(Cell)) throw std::length_error("FAAQueue capacity is too large");
         return p;
     }
 
@@ -83,7 +100,7 @@ template <class T, bool CasClaim = false> class FAAQueue {
 
 public:
     explicit FAAQueue(std::size_t capacity)
-        : n_(next_pow2(capacity < 2 ? 2 : capacity)), mask_(n_ - 1), shift_(log2_(n_)),
+        : n_(checked_capacity(capacity)), mask_(n_ - 1), shift_(log2_(n_)),
           cells_(new Cell[n_]) {
         for (std::size_t i = 0; i < n_; ++i)
             cells_[i].turn.store(0, std::memory_order_relaxed);
@@ -128,6 +145,8 @@ public:
 
     // Any thread. Blocks (spin+yield) while the queue is empty.
     void pop(T& out) {
+        static_assert(std::is_nothrow_move_assignable_v<T>,
+                      "FAAQueue::pop requires nothrow move assignment");
         const std::size_t t = take_ticket(popTicket_);
         Cell& c = cells_[t & mask_];
         const std::size_t round = t >> shift_;
@@ -139,6 +158,8 @@ public:
 
 private:
     template <class U> void emplace_impl(U&& v) {
+        static_assert(std::is_nothrow_constructible_v<T, U&&>,
+                      "FAAQueue::push requires nothrow construction");
         const std::size_t t = take_ticket(pushTicket_);
         Cell& c = cells_[t & mask_];
         const std::size_t round = t >> shift_;

@@ -6,7 +6,12 @@
 #include "mpmc/vyukov_queue.hpp"
 #include "test_util.hpp"
 
+#include <atomic>
 #include <cstdint>
+#include <limits>
+#include <stdexcept>
+#include <thread>
+#include <vector>
 
 // Capacity chosen so the bounded queues never hit full in these two helpers
 // (MS ignores the capacity argument entirely).
@@ -81,6 +86,29 @@ static void test_vyukov_bounded() {
     }
 }
 
+template <class Q> static void test_bounded_capacity_validation() {
+    Q one(1);
+    CHECK(one.capacity() == 2);  // minimum effective ring remains two cells
+
+    bool rejectedZero = false;
+    try {
+        Q q(0);
+        (void)q;
+    } catch (const std::invalid_argument&) {
+        rejectedZero = true;
+    }
+    CHECK(rejectedZero);
+
+    bool rejectedOverflow = false;
+    try {
+        Q q(std::numeric_limits<std::size_t>::max());
+        (void)q;
+    } catch (const std::length_error&) {
+        rejectedOverflow = true;
+    }
+    CHECK(rejectedOverflow);
+}
+
 static void test_vyukov_lifetime() {
     tu::Tracked::reset();
     {
@@ -95,6 +123,40 @@ static void test_vyukov_lifetime() {
     }
     CHECK(tu::Tracked::alive.load() == 0);  // destructor drained the rest
     CHECK(tu::Tracked::ctors.load() == tu::Tracked::dtors.load());
+}
+
+// Destruction must not require a default constructor or assignment operator:
+// neither operation is needed to tear down the live cells in the ring.
+struct NonDefaultNonAssignable {
+    static inline std::atomic<int> alive{0};
+
+    int value;
+    explicit NonDefaultNonAssignable(int v) : value(v) { ++alive; }
+    NonDefaultNonAssignable(const NonDefaultNonAssignable& other) noexcept
+        : value(other.value) {
+        ++alive;
+    }
+    NonDefaultNonAssignable(NonDefaultNonAssignable&& other) noexcept : value(other.value) {
+        ++alive;
+    }
+    NonDefaultNonAssignable& operator=(const NonDefaultNonAssignable&) = delete;
+    NonDefaultNonAssignable& operator=(NonDefaultNonAssignable&&) = delete;
+    ~NonDefaultNonAssignable() { --alive; }
+};
+
+static void test_vyukov_destructor_type_requirements() {
+    NonDefaultNonAssignable::alive = 0;
+    {
+        NonDefaultNonAssignable a(1), b(2);
+        {
+            mpmc::VyukovQueue<NonDefaultNonAssignable> q(4);
+            CHECK(q.try_push(a));
+            CHECK(q.try_push(b));
+            CHECK(NonDefaultNonAssignable::alive.load() == 4);
+        }
+        CHECK(NonDefaultNonAssignable::alive.load() == 2);
+    }
+    CHECK(NonDefaultNonAssignable::alive.load() == 0);
 }
 
 // FAA queue: blocking push/pop are safe single-threaded as long as we never
@@ -129,6 +191,40 @@ static void test_faa_basics() {
     CHECK(tu::Tracked::ctors.load() == tu::Tracked::dtors.load());
 }
 
+static void test_ebr_registry_exhaustion() {
+    // Reserve the main thread's slot, fill every remaining slot with a pinned
+    // worker, then prove one extra registrant gets an exception rather than an
+    // out-of-bounds slot index in release builds.
+    mpmc::ebr::Guard mainGuard;
+    std::atomic<std::size_t> ready{0};
+    std::atomic<bool> release{false};
+    std::vector<std::thread> workers;
+    workers.reserve(mpmc::ebr::kMaxThreads - 1);
+    for (std::size_t i = 1; i < mpmc::ebr::kMaxThreads; ++i) {
+        workers.emplace_back([&] {
+            mpmc::ebr::Guard guard;
+            ready.fetch_add(1, std::memory_order_release);
+            while (!release.load(std::memory_order_acquire)) std::this_thread::yield();
+        });
+    }
+    while (ready.load(std::memory_order_acquire) != mpmc::ebr::kMaxThreads - 1)
+        std::this_thread::yield();
+
+    bool rejected = false;
+    std::thread extra([&] {
+        try {
+            mpmc::ebr::Guard guard;
+            (void)guard;
+        } catch (const std::runtime_error&) {
+            rejected = true;
+        }
+    });
+    extra.join();
+    release.store(true, std::memory_order_release);
+    for (auto& worker : workers) worker.join();
+    CHECK(rejected);
+}
+
 int main() {
     test_fifo_and_empty<mpmc::MSQueue<int>>();
     test_interleaved<mpmc::MSQueue<int>>();
@@ -141,10 +237,14 @@ int main() {
     test_interleaved<mpmc::VyukovQueue<int>>();
     test_fifo_and_empty<mpmc::VyukovQueue<int, true>>();  // backoff variant
     test_interleaved<mpmc::VyukovQueue<int, true>>();
+    test_bounded_capacity_validation<mpmc::VyukovQueue<int>>();
     test_vyukov_bounded();
     test_vyukov_lifetime();
+    test_vyukov_destructor_type_requirements();
 
+    test_bounded_capacity_validation<mpmc::FAAQueue<int>>();
     test_faa_basics();
+    test_ebr_registry_exhaustion();
 
     mpmc::ebr::flush_all_unsafe();
     return TEST_SUMMARY();
