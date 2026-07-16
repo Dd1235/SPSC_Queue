@@ -31,7 +31,9 @@ from pathlib import Path
 DEFAULT_QUEUES = ["ms", "vyukov", "vyukov-b", "faa", "casticket", "mutex", "moody"]
 FOCUS_QUEUES = {
     "h3": ["ms", "ms-fix", "ms-retry", "mutex"],
+    "h3s": ["ms", "ms-fix", "ms-retry"],
     "load": ["ms", "vyukov", "faa", "casticket", "mutex", "moody"],
+    "load2": ["ms", "vyukov", "faa", "casticket", "mutex", "moody"],
 }
 KNOWN_QUEUES = set(DEFAULT_QUEUES) | {"ms-fix", "ms-retry", "spsc"}
 CSV_KEY_COLUMNS = [
@@ -48,9 +50,25 @@ def shapes(smoke: bool, focus: str = ""):
             yield dict(mode="throughput", producers=pc[0], consumers=pc[1],
                        oversubscribe=1, qos="none")
         return
+    if focus == "h3s":
+        # F8 mechanism instrumentation: same shapes as h3, run against the
+        # STATS twin binary (pass --bench .../bench_mpmc_stats) so the ebr_*
+        # columns are populated. Mutex omitted: it has no EBR domain.
+        for pc in ((1, 1), (4, 4), (1, 7), (2, 6)):
+            yield dict(mode="throughput", producers=pc[0], consumers=pc[1],
+                       oversubscribe=1, qos="none")
+        return
     if focus == "load":
         # Optional offered-rate extension: schedule-to-dequeue latency, 4P:4C x1.
         for rate in (250_000, 500_000, 1_000_000, 2_000_000, 4_000_000):
+            yield dict(mode="latency", producers=4, consumers=4, oversubscribe=1,
+                       qos="none", rate=rate)
+        return
+    if focus == "load2":
+        # Saturation extension: the 0.25-4M sweep never saturated any arm
+        # (delivered fraction 1.0 everywhere), so push the offered rate toward
+        # each design's measured 4:4 throughput to expose the knees.
+        for rate in (6_000_000, 8_000_000, 12_000_000, 16_000_000, 24_000_000):
             yield dict(mode="latency", producers=4, consumers=4, oversubscribe=1,
                        qos="none", rate=rate)
         return
@@ -252,7 +270,7 @@ def main():
     ap.add_argument("--queues",
                     help="comma-separated queue list (focus profiles have tailored defaults)")
     ap.add_argument("--smoke", action="store_true", help="tiny matrix for pipeline testing")
-    ap.add_argument("--focus", default="", choices=["", "h1", "h3", "load"],
+    ap.add_argument("--focus", default="", choices=["", "h1", "h3", "h3s", "load", "load2"],
                     help="named shape subset (h1/h3/load)")
     output_mode = ap.add_mutually_exclusive_group()
     output_mode.add_argument("--overwrite", action="store_true",
