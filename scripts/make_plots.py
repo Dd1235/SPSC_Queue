@@ -453,33 +453,14 @@ def md_table(piv):
     return "\n".join(lines)
 
 
-def write_summary(df, outdir, tag, selection):
+def write_summary(df, outdir, tag, selections):
     lines = [f"# Matrix summary ({tag})", ""]
     lines.append(
-        f"selected rows: {len(df)} of {selection.source_rows}; "
-        f"configs: {selection.configurations}; "
-        f"measured trials: {','.join(str(t) for t in selection.complete_trials)}; "
+        f"selected rows: {len(df)}; "
         f"calib drift: {df.calib_ns.min()/1e6:.1f}–{df.calib_ns.max()/1e6:.1f} ms"
     )
-    if selection.dropped_trials:
-        lines.append(
-            "Incomplete/trailing trials excluded: "
-            + ", ".join(str(t) for t in selection.dropped_trials)
-            + "."
-        )
-    if selection.excluded_known_rows:
-        lines.append(
-            f"Documented unsupported moody/cap64/x4 rows excluded: "
-            f"{selection.excluded_known_rows}."
-        )
-    if selection.excluded_incomplete_latency_rows:
-        by_queue = ", ".join(
-            f"{queue}={count}" for queue, count in selection.incomplete_latency_by_queue
-        )
-        lines.append(
-            "Non-exact latency samples excluded (sample buffer count differed from the "
-            f"exact scheduled count): {by_queue}."
-        )
+    for path, selection in selections:
+        lines.append(f"- `{path}`: {selection.describe()}")
     measured = df[df.trial > 0]
     sample_n = measured.groupby(CONFIG_COLUMNS, observed=True).size()
     lines.append(
@@ -513,7 +494,10 @@ def write_summary(df, outdir, tag, selection):
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--csv", default="paper/data/matrix_v1.csv")
+    ap.add_argument("--csv", default="paper/data/matrix_v1.csv",
+                    help="dataset path, or comma-separated paths sharing one protocol "
+                         "(each file is validated and round-selected independently, "
+                         "then concatenated -- e.g. the load + load2 rate sweeps)")
     ap.add_argument("--tag", default="v1")
     ap.add_argument("--assets", default="paper/assets")
     ap.add_argument("--summary-dir",
@@ -524,14 +508,21 @@ def main():
                     help="cap the complete measured rounds retained (trial 0 is warm-up)")
     args = ap.parse_args()
 
+    paths = [p.strip() for p in args.csv.split(",") if p.strip()]
+    frames = []
+    selections = []
     try:
-        df, selection = load_dataset(args.csv, seconds=args.seconds, max_trial=args.max_trial)
+        for path in paths:
+            frame, sel = load_dataset(path, seconds=args.seconds, max_trial=args.max_trial)
+            frames.append(frame)
+            selections.append((path, sel))
+            print(f"dataset selection [{path}]: {sel.describe()}")
     except DatasetError as exc:
         ap.error(str(exc))
-    print(f"dataset selection: {selection.describe()}")
+    df = frames[0] if len(frames) == 1 else pd.concat(frames, ignore_index=True)
     assets = Path(args.assets)
     assets.mkdir(parents=True, exist_ok=True)
-    data_dir = Path(args.summary_dir) if args.summary_dir else Path(args.csv).parent
+    data_dir = Path(args.summary_dir) if args.summary_dir else Path(paths[0]).parent
     data_dir.mkdir(parents=True, exist_ok=True)
 
     generated = []
@@ -581,7 +572,7 @@ def main():
     emit("fig_loadcurve", fig_loadcurve, has_load_focus)
     emit("fig_mechanism", fig_mechanism,
          generic and "retries_per_op" in df.columns and df.retries_per_op.max() > 0)
-    write_summary(df, data_dir, args.tag, selection)
+    write_summary(df, data_dir, args.tag, selections)
     print("generated figures: " + (", ".join(generated) if generated else "none"))
     print("skipped figures (required data absent/profile-specific): " + ", ".join(skipped))
     print(f"summary -> {data_dir}/summary_{args.tag}.md")
