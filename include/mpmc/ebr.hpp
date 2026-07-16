@@ -20,7 +20,8 @@
 //     thread, released at thread exit.
 //   - Per-thread retire lists are flat vectors scanned during maintenance; a
 //     threshold batches the scans. Simplicity over peak reclamation speed --
-//     reclamation is off the measured hot path.
+//     maintenance is still part of the measured dequeue/makespan path whenever
+//     a retiring thread reaches the threshold.
 //   - A stalled/preempted pinned thread delays reclamation (memory grows) but
 //     never corrupts. This is the well-known EBR tradeoff vs hazard pointers.
 //   - Threads that exit with unreclaimed nodes hand them to a mutex-protected
@@ -32,28 +33,29 @@
 //   kLegacy  -- the study's original code: one advance attempt per maintenance
 //               and an O(limbo) compaction pass to free expired entries.
 //               Measured pathology: 742 MB peak RSS at 1P:7C in 2 s.
-//   kPrefix  -- THE FIX, and it is embarrassingly small: per-thread limbo
-//               epochs are nondecreasing, so expired entries form a prefix;
-//               free until the first survivor and erase once -- O(freed).
-//               Root cause insight: the "advancement starvation" we measured
-//               was really a COST FEEDBACK LOOP -- O(limbo) maintenance
-//               lengthened pins, which made all-aligned scan instants rarer,
-//               which grew limbo, which made maintenance slower still. Cheap
-//               reclamation breaks the loop; natural advancement then
-//               suffices.
+//   kPrefix  -- the successful measured variant at the consumer-heavy shapes:
+//               per-thread limbo epochs are nondecreasing, so expired entries
+//               form a prefix; free until the first survivor and erase once.
+//               With a vector, an erase shifts survivors, so a freeing pass
+//               remains O(limbo), but a no-expiration pass is O(1) instead of
+//               rewriting the whole list. A scan-cost feedback loop is
+//               consistent with the result, but limbo size and maintenance
+//               time were not instrumented and the 1:1 boundary remains
+//               unresolved.
 //   kRetry   -- the "obvious" heavier remediation (defer maintenance past the
 //               unpin + retry advancement until two successes + amortized
-//               pin-path advances). Kept because it measurably BACKFIRES
-//               (registry-scan coherence traffic taxes every pin/unpin) --
-//               a negative result the paper reports.
+//               pin-path advances). The measured bundle is slower and uses
+//               more memory at consumer-heavy shapes. Because it changes
+//               several mechanisms together, the data do not assign that loss
+//               to any one component.
 //
 #pragma once
 
 #include <atomic>
-#include <cassert>
 #include <cstddef>
 #include <cstdint>
 #include <mutex>
+#include <stdexcept>
 #include <vector>
 
 namespace mpmc::ebr {
@@ -123,7 +125,7 @@ struct ThreadCtx {
                 return;
             }
         }
-        assert(false && "ebr: too many concurrent threads (raise kMaxThreads)");
+        throw std::runtime_error("ebr: thread registry exhausted (raise kMaxThreads)");
     }
 
     ~ThreadCtx() {
@@ -153,9 +155,10 @@ struct ThreadCtx {
     }
 
     // kPrefix/kRetry: limbo epochs are nondecreasing (stamped at retire time),
-    // so expired entries form a PREFIX -- free until the first survivor and
-    // erase once. O(freed), not O(limbo): this is what breaks the feedback
-    // loop.
+    // so expired entries form a PREFIX. When none are expired this examines one
+    // entry and avoids legacy's full scan/rewrite. When entries are freed,
+    // vector::erase still shifts every survivor: O(freed + survivors), not just
+    // O(freed).
     void free_expired_prefix(std::uint64_t e) {
         std::size_t i = 0;
         while (i < limbo.size() && limbo[i].epoch + 2 <= e) {
@@ -249,8 +252,9 @@ private:
 };
 
 // Select the reclamation mode for the F8 experiment (see header comment):
-// 0 = kLegacy (original), 1 = kPrefix (the fix), 2 = kRetry (heavy variant,
-// measured to backfire). Set before threads start operating.
+// 0 = kLegacy, 1 = kPrefix, 2 = kRetry. Their observed trade-offs are reported
+// by the experiment rather than encoded as correctness labels here. Set before
+// threads start operating.
 inline void set_reclaim_mode(int mode) {
     detail::Domain::instance().reclaimMode.store(mode, std::memory_order_relaxed);
 }
