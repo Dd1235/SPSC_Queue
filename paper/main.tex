@@ -10,6 +10,7 @@
 % 7 kept rounds), matrix_h3s.csv (reclamation mechanism, stats build, 7 kept
 % rounds), matrix_v3s.csv (1.5 s instrumented profile, 2 kept rounds),
 % matrix_load.csv + matrix_load2.csv (offered-load sweeps, 5 + 6 kept rounds),
+% matrix_ind.csv (industrial cross-checks: rigtorp, xenium; 8 kept rounds),
 % and matrix_v1.csv (first replication);
 % aggregation = scripts/make_plots.py; claim->data map = notes/claims.md.
 \documentclass[conference]{IEEEtran}
@@ -58,14 +59,19 @@ lock-free progress guarantee, so this is a coordination-structure result, not
 a progress-class comparison. Parent controls show that yielding backoff does
 not rescue the CAS design and that FAA is not necessary for the ticket design's
 qualitative profile; at capacity 64, however, both ticket variants collapse.
+An industrial cross-check sharpens the attribution: rigtorp's busy-spinning
+ticket queue matches ours at 1:1 and collapses ${\sim}700\times$ under
+oversubscription, so the robustness is an interaction of ticket structure
+with yielding waits.
 Requesting background rather than interactive QoS for all workers reverses the ranking,
 although the experiment cannot attribute that change to a particular core
 class. The mutex leads at the tested 4:4 and 2:6 $\times1$ shapes. Finally, the
 Michael--Scott implementation reaches 742\,MB median peak RSS after a two-second
 producer interval; replacing its unconditional limbo scan with prefix
 reclamation cuts peak RSS by 76--82\% at consumer-heavy shapes and raises
-end-to-end throughput by 28--76\%. The artifact provides raw CSVs, claim checks,
-and scripted experiment profiles.
+end-to-end throughput by 28--76\%, while a hazard-pointer arm shows the memory
+failure mode survives the reclamation-scheme swap. The artifact provides raw
+CSVs, claim checks, and scripted experiment profiles.
 \end{abstract}
 
 \section{Introduction}
@@ -99,10 +105,14 @@ Contributions:
         capacity-dependent ticket/CAS contrast under oversubscription; ranking
         changes under QoS policy; mutex wins at two mixed-ratio shapes;
         per-design saturation knees under offered load
-        (Sec.~\ref{sec:knees}); and an implementation-specific reclamation
+        (Sec.~\ref{sec:knees}); an implementation-specific reclamation
         pathology analyzed with a successful prefix change, a failed heavier
         remediation, and an instrumented mechanism replication that separates
-        maintenance cost from epoch advancement (Sec.~\ref{sec:ebrfix}).
+        maintenance cost from epoch advancement (Sec.~\ref{sec:ebrfix}); and
+        industrial cross-checks (Sec.~\ref{sec:industrial}) --- an
+        independently engineered ticket queue that isolates wait policy as
+        existential within the ticket structure, and a hazard-pointer arm
+        showing the memory failure mode survives a reclamation-scheme swap.
 \end{itemize}
 
 \section{Background and Related Work}
@@ -352,7 +362,10 @@ FAA is not necessary for the qualitative ticket result; FAA is nevertheless
 1.5--2.3$\times$ faster than CAS/ticket at the two endpoints. Because no
 single-variable control transforms Vyukov's cell protocol into the ticket/turn
 protocol, these comparisons are \emph{consistent with}, but do not isolate,
-the broader ticket/turn structure as the source of robustness.
+the broader ticket/turn structure as the source of robustness. The industrial
+cross-check (Sec.~\ref{sec:industrial}) adds the missing cell of this design:
+within the \emph{ticket} structure, wait policy is decisive --- the yielding
+result above is structure-specific, not general.
 
 \begin{table}[t]
 \caption{Within-parent controls (Mops/s, 4P:4C, capacity 1024). Tails are
@@ -416,6 +429,56 @@ counts, while the fastest arm has far more, so raw switch count does not explain
 the ordering. Together these diagnostics support a shared-cursor-contention
 explanation, but two measured rounds, perturbing atomic counters, and no cache
 coherence measurements preclude a causal claim.
+
+\subsection{Industrial cross-checks}
+\label{sec:industrial}
+\begin{figure}[t]\centering
+\maybefig[ind]{fig_industrial}{\linewidth}
+\caption{Industrial cross-checks (matrix ind, eight measured rounds). Left:
+oversubscription response of two independently engineered ticket/turn queues
+--- ours (yielding slot waits) and rigtorp's (busy-spin waits). Right: peak
+RSS of the same Michael--Scott algorithm under our EBR and xenium's hazard
+pointers.}
+\label{fig:industrial}
+\end{figure}
+Two pinned third-party arms test whether the headline findings are properties
+of our implementations (matrix ind: the key shapes rerun with
+\texttt{rigtorp::MPMCQueue} and xenium's Michael--Scott queue under
+hazard-pointer reclamation, same rounds and thermal regime).
+
+\textbf{rigtorp: the ticket structure needs yielding waits.}
+rigtorp's queue shares our FAA queue's coordination structure (fetch-add
+claim, per-slot turn wait) but busy-spins its waits. At 1:1 the two agree
+(120.3 vs 125.6 Mops/s, $-4\%$): the structures are equivalent at low
+contention, which is also the regime rigtorp documents itself for, and its
+paced-load p50 matches ours (0.4\,\textmu s at 1\,M msg/s). Under load they
+diverge catastrophically: $-41\%$ at dedicated 4:4, then 0.12 and 0.04\,Mops/s
+at $\times2$/$\times4$ where our queue \emph{rises} to 29.6 --- a
+${\sim}700\times$ gap within one coordination structure, leaving rigtorp
+below Vyukov (1.66). At $\times4$ paced load it cannot sustain 1\,M msg/s
+(p50 = 25.7\,s of backlog). This completes the attribution design of
+Sec.~\ref{sec:oversub}: yielding politeness changed nothing inside the
+CAS-retry structure (\textsf{vyukov-b}) but is existential inside the ticket
+structure, where tickets are irrevocable and only yielding waiters return the
+CPU to a preempted claimant. Robustness is an \emph{interaction} of structure
+and wait policy; neither alone predicts it.
+
+\textbf{xenium: the memory failure mode survives a reclamation-scheme swap.}
+Hazard pointers bound unreclaimed garbage by construction, yet the unbounded
+Michael--Scott queue under xenium's HP still peaks at 760\,MB at 1:7 (548 at
+2:6, 421 at 1:1) --- the same order as our EBR-legacy arm (944/662/653) and
+two orders above every bounded design. Bounded garbage means the bulk must be
+live nodes, independently corroborating Sec.~\ref{sec:ebrfix}: unboundedness
+plus rate mismatch, not reclamation mechanics, is the first-order cause; the
+EBR-specific cost spiral was the fixable amplifier on top (prefix fix:
+153--227\,MB at the same shape). The scheme swap also prices the textbook
+HP-versus-EBR tradeoff on this platform: throughput parity at 1:1 ($+2\%$)
+degrading to $-43\%$ at 1:7 --- HP's per-traversal fences ride the consumer
+side, so its cost grows with consumer parallelism, extending Hart et
+al.~\cite{hart2007} to asymmetric client silicon. One corner also inverts:
+at capacity 64 under $\times4$, the unbounded arms lead (4.94/3.64 vs.\ 2.46
+FAA, 0.88 Vyukov) --- with almost no slack, not exerting back-pressure is
+briefly an advantage, at the usual memory price.
 
 \subsection{QoS policy reorders the ranking}
 \begin{figure}[t]\centering
@@ -627,9 +690,14 @@ count.
 
 \textbf{Implementation validity.} The custom queues are study implementations,
 not each design's best-known optimized version. The MS findings include this
-specific allocator and EBR, not the Michael--Scott algorithm or EBR generally.
-The two controls are single-change only relative to their own parents; there is
-no single-change bridge between the CAS ring and ticket/turn protocol.
+specific allocator and EBR, not the Michael--Scott algorithm or EBR generally
+--- though the xenium hazard-pointer arm (Sec.~\ref{sec:industrial}) shows the
+memory conclusion is not EBR-specific, and the rigtorp arm shows the ticket
+robustness is reproducible by independent engineering when waits yield. The
+two controls are single-change only relative to their own parents; there is
+no single-change bridge between the CAS ring and ticket/turn protocol, and
+rigtorp differs from our FAA queue in more than wait policy (it is a matched
+\emph{structure}, not a matched implementation).
 Moodycamel differs in global ordering and capacity semantics, so it is context,
 not a matched control. Stress invariants and ThreadSanitizer catch many safety
 failures but do not prove linearizability or progress. Replication on other
@@ -643,17 +711,23 @@ does not survive all mixed ratios; the mutex leads at 4:4 and 2:6; the
 capacity-1024 ticket protocol improves under oversubscription while the CAS
 reservation ring collapses; and changing QoS policy reverses their ranking
 without revealing which cores ran them. Parent controls rule out one yielding
-policy as a remedy and show that FAA is not required for the ticket profile,
-but do not by themselves prove the ticket/turn protocol is causal. Capacity 64
-restores the predicted reservation stall.
+policy as a remedy inside the CAS structure and show that FAA is not required
+for the ticket profile; the industrial cross-check then shows a busy-spinning
+ticket queue collapsing ${\sim}700\times$ where a yielding one improves ---
+the robustness is an interaction of coordination structure and wait policy,
+and capacity 64 restores the predicted reservation stall in both ticket
+implementations.
 
-For this MS+EBR implementation, process memory is as important as speed. Prefix
-reclamation materially improves consumer-heavy shapes, has a throughput cost at
-4:4, and leaves 1:1 unresolved; the heavier remediation bundle fails. The
-practical lesson is conditional: measure completed-message makespan, tails,
-memory, work balance, capacity, and scheduler policy in the intended deployment
-rather than extrapolating from 1:1 throughput or from labels such as
-``lock-free.''
+For unbounded node-based implementations, process memory is as important as
+speed, under either reclamation scheme we measured: hazard pointers cap
+garbage yet the queue still peaks near 760\,MB at 1:7, because the residual
+is live nodes from rate mismatch. Within EBR, prefix reclamation materially
+improves consumer-heavy shapes at a small 4:4 throughput cost, the instrumented
+counters attribute the win to maintenance cost rather than epoch advancement,
+and the heavier remediation bundle fails. The practical lesson is conditional:
+measure completed-message makespan, tails, memory, work balance, capacity, and
+scheduler policy in the intended deployment rather than extrapolating from 1:1
+throughput or from labels such as ``lock-free.''
 
 \section*{Artifact}
 Code, committed raw CSVs, claim checks, experiment profiles, and the figure
