@@ -1,23 +1,25 @@
 # Matrix summary (v3s)
 
-rows: 412  configs: 64  calib drift: 93.8–134.6 ms
+selected rows: 227 of 412; configs: 77; measured trials: 1,2; calib drift: 93.8–134.6 ms
+Non-exact latency samples excluded (sample buffer count differed from the exact scheduled count): moody=1, ms=2, vyukov=1.
+Per-configuration retained sample n: 1–2.
 
 ## Throughput medians (Mops/s), dedicated cores, qos=none
 | ratio | casticket | faa | moody | ms | mutex | spsc | vyukov | vyukov-b |
 |---|---|---|---|---|---|---|---|---|
-| 1:1 | 78.6 | 128.14 | 25.87 | 11.94 | 34.14 | 365.66 | 117.1 | 115.75 |
-| 2:2 | 27.16 | 25.6 | 14.74 | 16.41 | 23.23 |  | 23.27 | 23.52 |
-| 4:4 | 19.6 | 16.43 | 7.55 | 5.69 | 19.15 |  | 7.9 | 8.6 |
+| 1:1 | 78.43 | 129.36 | 25.7 | 11.78 | 33.87 | 363.92 | 116.78 | 112.91 |
+| 2:2 | 26.59 | 25.36 | 13.45 | 16.32 | 22.98 |  | 23.51 | 23.07 |
+| 4:4 | 15.93 | 16.48 | 7.94 | 5.78 | 19.05 |  | 8.05 | 8.4 |
 
-## Oversubscription (4P:4C), throughput medians
+## Oversubscription (4P:4C, capacity 1024), throughput medians
 | oversubscribe | casticket | faa | moody | ms | mutex | vyukov | vyukov-b |
 |---|---|---|---|---|---|---|---|
-| 1 | 19.6 | 16.43 | 7.55 | 5.69 | 19.15 | 7.9 | 8.6 |
-| 2 | 12.52 | 19.6 | 7.88 | 5.47 | 14.76 | 2.03 | 2.6 |
-| 4 | 18.34 | 19.98 | 7.89 | 5.36 | 14.54 | 1.58 | 1.43 |
+| 1 | 15.93 | 16.48 | 7.94 | 5.78 | 19.05 | 8.05 | 8.4 |
+| 2 | 12.52 | 24.74 | 8.01 | 5.45 | 14.35 | 1.64 | 1.79 |
+| 4 | 18.2 | 30.17 | 7.73 | 5.42 | 14.73 | 1.72 | 1.66 |
 
 ## Latency p99.9 (us), paced 1M/s 4P:4C
 | oversubscribe | casticket | faa | moody | ms | mutex | vyukov | vyukov-b |
 |---|---|---|---|---|---|---|---|
-| 1 | 287.9 | 835.7 | 348.8 | 426.6 | 482.2 | 674.4 | 918.7 |
-| 4 | 12313.5 | 12450.5 | 103123 | 73241.3 | 71514.1 | 95919 | 65130.3 |
+| 1 | 6948.5 | 951 | 234.6 | 2373 | 468.8 | 534.8 | 520.8 |
+| 4 | 13410.4 | 12521.6 | 96572.1 | 39578.1 | 77145.5 | 99586 | 74460.2 |
