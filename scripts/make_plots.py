@@ -22,6 +22,8 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import pandas as pd
 
+from dataset_utils import CONFIG_COLUMNS, DatasetError, DatasetSelection, load_dataset
+
 # Fixed entity colors (validated 6-slot categorical palette; CVD-safe order).
 # Control variants wear their parent's hue restyled (hatch/dash), never a new
 # hue: color follows the entity family (dataviz rule -- no 7th/8th hues).
@@ -58,13 +60,20 @@ plt.rcParams.update({
     "grid.linewidth": 0.5,
     "axes.axisbelow": True,
     "figure.dpi": 200,
+    # IEEE-style publication pipelines reject Matplotlib's default Type 3 PDF
+    # glyphs.  Embed TrueType outlines instead.
+    "pdf.fonttype": 42,
+    "ps.fonttype": 42,
 })
 
 
 def agg(df, value):
     """median + IQR over trials > 0, grouped by config columns + queue."""
     d = df[df.trial > 0]
-    g = d.groupby(["queue", "mode", "producers", "consumers", "oversubscribe", "qos"])[value]
+    # Keep every experimental axis in the grouping key.  In particular,
+    # capacity, duration, and offered rate must never be pooled merely because
+    # a caller forgot that a CSV contains a control sweep.
+    g = d.groupby(CONFIG_COLUMNS, observed=True)[value]
     out = g.agg(median="median",
                 q1=lambda s: s.quantile(0.25),
                 q3=lambda s: s.quantile(0.75),
@@ -103,7 +112,8 @@ def grouped_bars(ax, sub, xcats, xkey, ykey="median", ylabel="", logy=False):
 
 def fig_throughput_ratio(df, outdir, tag):
     sub = agg(df[(df["mode"] == "throughput") & (df.oversubscribe == 1) &
-                 (df.qos == "none") & (df.queue != "spsc")], "throughput_mops")
+                 (df.qos == "none") & (df.capacity == 1024) &
+                 (df.queue != "spsc")], "throughput_mops")
     sub["ratio"] = sub.producers.astype(str) + ":" + sub.consumers.astype(str)
     ratios = ["1:1", "2:2", "4:4", "1:7", "2:6", "6:2", "7:1"]
     ratios = [r for r in ratios if r in set(sub.ratio)]
@@ -119,8 +129,8 @@ def fig_throughput_ratio(df, outdir, tag):
 
 def fig_oversubscription(df, outdir, tag):
     sub = agg(df[(df["mode"] == "throughput") & (df.producers == 4) & (df.consumers == 4) &
-                 (df.qos == "none")], "throughput_mops")
-    fig, ax = plt.subplots(figsize=(3.4, 2.6))
+                 (df.qos == "none") & (df.capacity == 1024)], "throughput_mops")
+    fig, ax = plt.subplots(figsize=(3.4, 3.15))
     for q in queues_present(sub):
         rows = sub[sub.queue == q].sort_values("oversubscribe")
         ax.errorbar(rows.oversubscribe, rows["median"],
@@ -134,16 +144,18 @@ def fig_oversubscription(df, outdir, tag):
     ax.set_xticklabels(["x1\n(8 thr)", "x2\n(16 thr)", "x4\n(32 thr)"])
     ax.set_yscale("log")
     ax.set_ylabel("throughput (Mops/s, log)")
-    ax.set_xlabel("oversubscription (4P:4C base)")
-    ax.legend(fontsize=6.5, frameon=False)
+    ax.set_xlabel("oversubscription (4P:4C base, capacity 1024)")
+    ax.legend(fontsize=5.8, frameon=False, ncol=2, loc="lower center",
+              bbox_to_anchor=(0.5, 1.01), columnspacing=0.8, handlelength=1.8)
     fig.tight_layout()
     for ext in ("pdf", "png"):
-        fig.savefig(outdir / f"fig_oversubscription_{tag}.{ext}")
+        fig.savefig(outdir / f"fig_oversubscription_{tag}.{ext}", bbox_inches="tight")
     plt.close(fig)
 
 
 def fig_latency_tail(df, outdir, tag):
-    base = df[(df["mode"] == "latency") & (df.producers == 4) & (df.consumers == 4)]
+    base = df[(df["mode"] == "latency") & (df.producers == 4) & (df.consumers == 4) &
+              (df.capacity == 1024) & (df.qos == "none") & (df.rate == 1_000_000)]
     fig, axes = plt.subplots(1, 2, figsize=(6.8, 2.6), sharey=True)
     for ax, f in zip(axes, [1, 4]):
         subdf = base[base.oversubscribe == f]
@@ -161,12 +173,24 @@ def fig_latency_tail(df, outdir, tag):
             r = sub[sub.queue == q].set_index("stat")
             xs = [j + (i - (n - 1) / 2) * width for j in range(len(cats))]
             ys = [r.loc[c, "median"] if c in r.index else float("nan") for c in cats]
+            lo = [r.loc[c, "median"] - r.loc[c, "q1"] if c in r.index else float("nan")
+                  for c in cats]
+            hi = [r.loc[c, "q3"] - r.loc[c, "median"] if c in r.index else float("nan")
+                  for c in cats]
             ax.bar(xs, ys, width * 0.92, color=COLOR[q], label=LABEL[q] if f == 1 else None,
                    edgecolor="white", linewidth=0.6)
+            ax.errorbar(xs, ys, yerr=[lo, hi], fmt="none", ecolor="#444",
+                        elinewidth=0.7, capsize=1.5)
         ax.set_xticks(range(len(cats)))
         ax.set_xticklabels(cats)
         ax.set_yscale("log")
         ax.set_title(f"oversubscription x{f}", fontsize=8.5)
+        sample_n = subdf[subdf.trial > 0].groupby("queue", observed=True).size()
+        if not sample_n.empty:
+            n_text = (str(int(sample_n.min())) if sample_n.min() == sample_n.max()
+                      else f"{int(sample_n.min())}–{int(sample_n.max())}")
+            ax.set_xlabel(f"retained n={n_text} per queue", fontsize=6.5,
+                          color="#555", labelpad=1)
     axes[0].set_ylabel("tick-to-pop latency (ns, log)")
     axes[0].legend(fontsize=6.5, frameon=False)
     fig.suptitle("paced 1 M msg/s, 4P:4C — coordinated-omission-aware", fontsize=8.5, y=1.02)
@@ -178,11 +202,11 @@ def fig_latency_tail(df, outdir, tag):
 
 def fig_qos(df, outdir, tag):
     sub = agg(df[(df["mode"] == "throughput") & (df.producers == 4) & (df.consumers == 4) &
-                 (df.oversubscribe == 1)], "throughput_mops")
+                 (df.oversubscribe == 1) & (df.capacity == 1024)], "throughput_mops")
     cats = [q for q in ["none", "all-int", "all-bg", "prod-bg", "cons-bg"] if q in set(sub.qos)]
     fig, ax = plt.subplots(figsize=(6.8, 2.6))
     grouped_bars(ax, sub, cats, "qos", ylabel="throughput (Mops/s)")
-    ax.set_xlabel("QoS policy (P-core bias = interactive, E-core bias = background)")
+    ax.set_xlabel("requested thread QoS policy (interactive / background; best-effort)")
     ax.legend(ncol=3, fontsize=7, frameon=False)
     fig.tight_layout()
     for ext in ("pdf", "png"):
@@ -204,7 +228,7 @@ def fig_calib(df, outdir, tag):
 
 
 def fig_fairness(df, outdir, tag):
-    """Producer & consumer fairness (CoV of per-thread op counts), 4P:4C."""
+    """Finite-window producer/consumer work balance, 4P:4C (legacy file stem)."""
     base = df[(df["mode"] == "throughput") & (df.producers == 4) & (df.consumers == 4) &
               (df.qos == "none") & (df.capacity == 1024)]
     fig, axes = plt.subplots(1, 2, figsize=(6.8, 2.6), sharey=True)
@@ -229,7 +253,7 @@ def fig_mechanism(df, outdir, tag):
     """Stats-build dataset: retries/op (log) and involuntary csw vs oversub."""
     base = df[(df["mode"] == "throughput") & (df.producers == 4) & (df.consumers == 4) &
               (df.qos == "none") & (df.capacity == 1024)]
-    fig, axes = plt.subplots(1, 2, figsize=(6.8, 2.6))
+    fig, axes = plt.subplots(1, 2, figsize=(6.8, 2.9))
     zero_arms = []
     for q in queues_present(base):
         rows = agg(base[base.queue == q], "retries_per_op").sort_values("oversubscribe")
@@ -270,7 +294,8 @@ def fig_mechanism(df, outdir, tag):
 
 def fig_ebrfix(df, outdir, tag):
     """F8 A/B/C: peak RSS (log) and throughput across ratios, ms modes+mutex."""
-    base = df[(df["mode"] == "throughput") & (df.oversubscribe == 1) & (df.qos == "none")]
+    base = df[(df["mode"] == "throughput") & (df.oversubscribe == 1) &
+              (df.qos == "none") & (df.capacity == 1024)]
     base = base.copy()
     base["ratio"] = base.producers.astype(str) + ":" + base.consumers.astype(str)
     ratios = [r for r in ["1:1", "4:4", "2:6", "1:7"] if r in set(base.ratio)]
@@ -282,53 +307,73 @@ def fig_ebrfix(df, outdir, tag):
     fig, axes = plt.subplots(1, 2, figsize=(6.8, 2.6))
     for ax, col, ylabel, logy in ((axes[0], "peak_rss_mb", "peak RSS (MB, log)", True),
                                   (axes[1], "throughput_mops", "throughput (Mops/s)", False)):
-        d = base[base.ratio.isin(ratios)]
-        sub = d[d.trial > 0].groupby(["ratio", "queue"])[col]
-        med = sub.median().reset_index()
-        qs = [q for q in ["ms", "ms-fix", "ms-retry", "mutex"] if q in set(med.queue)]
+        d = base[base.ratio.isin(ratios) & (base.trial > 0)]
+        stats = d.groupby(["ratio", "queue"], observed=True)[col].agg(
+            median="median",
+            q1=lambda values: values.quantile(0.25),
+            q3=lambda values: values.quantile(0.75),
+        ).reset_index()
+        qs = [q for q in ["ms", "ms-fix", "ms-retry", "mutex"] if q in set(stats.queue)]
         width = min(0.8 / max(len(qs), 1), 0.2)
         for i, q in enumerate(qs):
-            rows = med[med.queue == q].set_index("ratio")
-            xs, ys = [], []
+            rows = stats[stats.queue == q].set_index("ratio")
+            xs, ys, lo, hi = [], [], [], []
             for j, rt in enumerate(ratios):
                 if rt in rows.index:
+                    row = rows.loc[rt]
                     xs.append(j + (i - (len(qs) - 1) / 2) * width)
-                    ys.append(max(rows.loc[rt, col], 0.5) if logy else rows.loc[rt, col])
+                    value = float(row["median"])
+                    ys.append(max(value, 0.5) if logy else value)
+                    lo.append(value - float(row["q1"]))
+                    hi.append(float(row["q3"]) - value)
             ax.bar(xs, ys, width * 0.9, color=colors[q], label=labels[q],
                    edgecolor="white", linewidth=0.6, hatch=hatches.get(q))
+            ax.errorbar(xs, ys, yerr=[lo, hi], fmt="none", ecolor="#444",
+                        elinewidth=0.7, capsize=1.5)
         ax.set_xticks(range(len(ratios)))
         ax.set_xticklabels(ratios)
         ax.set_ylabel(ylabel)
         ax.set_xlabel("producers : consumers")
         if logy:
             ax.set_yscale("log")
-    axes[0].legend(fontsize=6, frameon=False)
-    fig.tight_layout()
+    handles, legend_labels = axes[0].get_legend_handles_labels()
+    fig.legend(handles, legend_labels, fontsize=6, frameon=False, ncol=4,
+               loc="upper center", bbox_to_anchor=(0.5, 1.0), columnspacing=1.0)
+    fig.tight_layout(rect=(0, 0, 1, 0.88))
     for ext in ("pdf", "png"):
         fig.savefig(outdir / f"fig_ebrfix_{tag}.{ext}")
     plt.close(fig)
 
 
 def fig_loadcurve(df, outdir, tag):
-    """F9: p99 latency vs offered load; points only below saturation (>=95%
-    delivered); saturated points annotated by absence."""
-    base = df[(df["mode"] == "latency") & (df.trial > 0)].copy()
-    base["delivered_frac"] = base.ops / (base.rate * base.seconds)
+    """Optional offered-rate profile: schedule-to-dequeue p99 latency."""
+    base = df[(df["mode"] == "latency") & (df.trial > 0) &
+              (df.producers == 4) & (df.consumers == 4) &
+              (df.oversubscribe == 1) & (df.capacity == 1024) &
+              (df.qos == "none")].copy()
     fig, ax = plt.subplots(figsize=(4.2, 2.8))
     for q in queues_present(base):
         d = base[base.queue == q]
-        med = d.groupby("rate").agg(p99=("p99_ns", "median"),
-                                    frac=("delivered_frac", "median")).reset_index()
-        ok = med[med.frac >= 0.95].sort_values("rate")
-        if len(ok):
-            ax.plot(ok.rate / 1e6, ok.p99 / 1000, color=COLOR[q], label=LABEL[q],
-                    marker="o", markersize=3.5, linewidth=1.5,
-                    linestyle="--" if q in DASH else "-")
+        stats = d.groupby("rate", observed=True)["p99_ns"].agg(
+            median="median",
+            q1=lambda values: values.quantile(0.25),
+            q3=lambda values: values.quantile(0.75),
+        ).reset_index().sort_values("rate")
+        if len(stats):
+            ax.errorbar(
+                stats.rate / 1e6,
+                stats["median"] / 1000,
+                yerr=[(stats["median"] - stats.q1) / 1000,
+                      (stats.q3 - stats["median"]) / 1000],
+                color=COLOR[q], label=LABEL[q], marker="o", markersize=3.5,
+                linewidth=1.5, capsize=1.5,
+                linestyle="--" if q in DASH else "-",
+            )
     ax.set_xscale("log")
     ax.set_yscale("log")
     ax.set_xlabel("offered load (M msg/s, log)")
     ax.set_ylabel("p99 latency (us, log)")
-    ax.set_title("points shown only below saturation (>=95% delivered)", fontsize=7.5)
+    ax.set_title("schedule-to-dequeue latency; exact sample-count rows", fontsize=7.5)
     ax.legend(fontsize=6, frameon=False)
     fig.tight_layout()
     for ext in ("pdf", "png"):
@@ -347,31 +392,62 @@ def md_table(piv):
     return "\n".join(lines)
 
 
-def write_summary(df, outdir, tag):
+def write_summary(df, outdir, tag, selection):
     lines = [f"# Matrix summary ({tag})", ""]
-    lines.append(f"rows: {len(df)}  configs: "
-                 f"{len(df.groupby(['queue','mode','producers','consumers','oversubscribe','qos']))}"
-                 f"  calib drift: {df.calib_ns.min()/1e6:.1f}–{df.calib_ns.max()/1e6:.1f} ms")
+    lines.append(
+        f"selected rows: {len(df)} of {selection.source_rows}; "
+        f"configs: {selection.configurations}; "
+        f"measured trials: {','.join(str(t) for t in selection.complete_trials)}; "
+        f"calib drift: {df.calib_ns.min()/1e6:.1f}–{df.calib_ns.max()/1e6:.1f} ms"
+    )
+    if selection.dropped_trials:
+        lines.append(
+            "Incomplete/trailing trials excluded: "
+            + ", ".join(str(t) for t in selection.dropped_trials)
+            + "."
+        )
+    if selection.excluded_known_rows:
+        lines.append(
+            f"Documented unsupported moody/cap64/x4 rows excluded: "
+            f"{selection.excluded_known_rows}."
+        )
+    if selection.excluded_incomplete_latency_rows:
+        by_queue = ", ".join(
+            f"{queue}={count}" for queue, count in selection.incomplete_latency_by_queue
+        )
+        lines.append(
+            "Non-exact latency samples excluded (sample buffer count differed from the "
+            f"exact scheduled count): {by_queue}."
+        )
+    measured = df[df.trial > 0]
+    sample_n = measured.groupby(CONFIG_COLUMNS, observed=True).size()
+    lines.append(
+        f"Per-configuration retained sample n: {int(sample_n.min())}–{int(sample_n.max())}."
+    )
     lines.append("")
-    lines.append("## Throughput medians (Mops/s), dedicated cores, qos=none")
-    t = agg(df[(df["mode"] == "throughput") & (df.oversubscribe == 1) & (df.qos == "none")],
-            "throughput_mops")
-    t["ratio"] = t.producers.astype(str) + ":" + t.consumers.astype(str)
-    piv = t.pivot_table(index="ratio", columns="queue", values="median")
-    lines.append(md_table(piv.round(2)))
-    lines.append("")
-    lines.append("## Oversubscription (4P:4C), throughput medians")
+    t = agg(df[(df["mode"] == "throughput") & (df.oversubscribe == 1) &
+               (df.qos == "none") & (df.capacity == 1024)], "throughput_mops")
+    if not t.empty:
+        lines.append("## Throughput medians (Mops/s), dedicated cores, qos=none")
+        t["ratio"] = t.producers.astype(str) + ":" + t.consumers.astype(str)
+        piv = t.pivot_table(index="ratio", columns="queue", values="median")
+        lines.append(md_table(piv.round(2)))
+        lines.append("")
     o = agg(df[(df["mode"] == "throughput") & (df.producers == 4) & (df.consumers == 4) &
-               (df.qos == "none")], "throughput_mops")
-    lines.append(md_table(o.pivot_table(index="oversubscribe", columns="queue",
-                                       values="median").round(2)))
-    lines.append("")
-    lines.append("## Latency p99.9 (us), paced 1M/s 4P:4C")
-    la = agg(df[df["mode"] == "latency"], "p999_ns")
+               (df.qos == "none") & (df.capacity == 1024)], "throughput_mops")
+    if o.oversubscribe.nunique() >= 2:
+        lines.append("## Oversubscription (4P:4C, capacity 1024), throughput medians")
+        lines.append(md_table(o.pivot_table(index="oversubscribe", columns="queue",
+                                           values="median").round(2)))
+        lines.append("")
+    la = agg(df[(df["mode"] == "latency") & (df.capacity == 1024) &
+                (df.qos == "none") & (df.rate == 1_000_000)], "p999_ns")
     la = la[(la.producers == 4) & (la.consumers == 4)]
-    lines.append(md_table((la.pivot_table(index="oversubscribe", columns="queue",
-                                        values="median") / 1000).round(1)))
-    (outdir / f"summary_{tag}.md").write_text("\n".join(lines) + "\n")
+    if not la.empty:
+        lines.append("## Latency p99.9 (us), paced 1M/s 4P:4C")
+        lines.append(md_table((la.pivot_table(index="oversubscribe", columns="queue",
+                                            values="median") / 1000).round(1)))
+    (outdir / f"summary_{tag}.md").write_text("\n".join(lines).rstrip() + "\n")
 
 
 def main():
@@ -379,29 +455,73 @@ def main():
     ap.add_argument("--csv", default="paper/data/matrix_v1.csv")
     ap.add_argument("--tag", default="v1")
     ap.add_argument("--assets", default="paper/assets")
+    ap.add_argument("--summary-dir",
+                    help="summary output directory (default: directory containing --csv)")
+    ap.add_argument("--seconds", type=float,
+                    help="select one duration when a CSV contains multiple runs")
+    ap.add_argument("--max-trial", type=int,
+                    help="cap the complete measured rounds retained (trial 0 is warm-up)")
     args = ap.parse_args()
 
-    df = pd.read_csv(args.csv)
+    try:
+        df, selection = load_dataset(args.csv, seconds=args.seconds, max_trial=args.max_trial)
+    except DatasetError as exc:
+        ap.error(str(exc))
+    print(f"dataset selection: {selection.describe()}")
     assets = Path(args.assets)
     assets.mkdir(parents=True, exist_ok=True)
-    data_dir = Path(args.csv).parent
+    data_dir = Path(args.summary_dir) if args.summary_dir else Path(args.csv).parent
+    data_dir.mkdir(parents=True, exist_ok=True)
 
-    fig_throughput_ratio(df, assets, args.tag)
-    fig_oversubscription(df, assets, args.tag)
-    fig_latency_tail(df, assets, args.tag)
-    fig_qos(df, assets, args.tag)
-    fig_calib(df, assets, args.tag)
-    if "cons_cov" in df.columns:
-        fig_fairness(df, assets, args.tag)
-    if set(df.queue) & {"ms-fix", "ms-retry"}:
-        fig_ebrfix(df, assets, args.tag)
-    if (df["mode"] == "latency").any() and df[df["mode"] == "latency"].rate.nunique() >= 3:
-        fig_loadcurve(df, assets, args.tag)
-    if "retries_per_op" in df.columns and df.retries_per_op.max() > 0:
-        fig_mechanism(df, assets, args.tag)
-    write_summary(df, data_dir, args.tag)
-    print(f"figures -> {assets}/fig_*_{args.tag}.(pdf|png); summary -> "
-          f"{data_dir}/summary_{args.tag}.md")
+    generated = []
+    skipped = []
+
+    def emit(stem, renderer, enabled):
+        if enabled:
+            renderer(df, assets, args.tag)
+            generated.append(stem)
+            return
+        skipped.append(stem)
+
+    has_ebr_focus = bool(set(df.queue) & {"ms-fix", "ms-retry"})
+    latency = df[(df["mode"] == "latency") & (df.capacity == 1024) &
+                 (df.qos == "none")]
+    has_load_focus = (
+        not (df["mode"] == "throughput").any()
+        and latency.rate.nunique() >= 3
+    )
+    generic = not has_ebr_focus and not has_load_focus
+
+    ratio_rows = df[(df["mode"] == "throughput") & (df.oversubscribe == 1) &
+                    (df.qos == "none") & (df.capacity == 1024)]
+    ratio_count = len(set(zip(ratio_rows.producers, ratio_rows.consumers)))
+    oversub_rows = df[(df["mode"] == "throughput") & (df.producers == 4) &
+                      (df.consumers == 4) & (df.qos == "none") &
+                      (df.capacity == 1024)]
+    qos_rows = df[(df["mode"] == "throughput") & (df.producers == 4) &
+                  (df.consumers == 4) & (df.oversubscribe == 1) &
+                  (df.capacity == 1024)]
+    tail_rows = latency[(latency.producers == 4) & (latency.consumers == 4) &
+                        (latency.rate == 1_000_000)]
+
+    emit("fig_throughput_ratio", fig_throughput_ratio, generic and ratio_count >= 2)
+    emit("fig_oversubscription", fig_oversubscription,
+         generic and oversub_rows.oversubscribe.nunique() >= 2)
+    emit("fig_latency_tail", fig_latency_tail,
+         generic and {1, 4}.issubset(set(tail_rows.oversubscribe)))
+    emit("fig_qos", fig_qos, generic and qos_rows.qos.nunique() >= 2)
+    emit("fig_calib", fig_calib, "calib_ns" in df.columns and not df.empty)
+    emit("fig_fairness", fig_fairness,
+         generic and "cons_cov" in df.columns and
+         {1, 4}.issubset(set(oversub_rows.oversubscribe)))
+    emit("fig_ebrfix", fig_ebrfix, has_ebr_focus)
+    emit("fig_loadcurve", fig_loadcurve, has_load_focus)
+    emit("fig_mechanism", fig_mechanism,
+         generic and "retries_per_op" in df.columns and df.retries_per_op.max() > 0)
+    write_summary(df, data_dir, args.tag, selection)
+    print("generated figures: " + (", ".join(generated) if generated else "none"))
+    print("skipped figures (required data absent/profile-specific): " + ", ".join(skipped))
+    print(f"summary -> {data_dir}/summary_{args.tag}.md")
 
 
 if __name__ == "__main__":
