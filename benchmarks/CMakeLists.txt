@@ -69,7 +69,10 @@ if(SPSC_BENCH_THIRDPARTY)
         GIT_TAG        11ffb3cd77998cba83c20d2853720be1625cd719) # v1.0
     FetchContent_Declare(xenium
         GIT_REPOSITORY https://github.com/mpoeter/xenium.git
-        GIT_TAG        1c449ae953ce2a440b0d16c5ed1181d2754860ab) # HEAD 2026-07
+        GIT_TAG        1c449ae953ce2a440b0d16c5ed1181d2754860ab # HEAD 2026-07
+        # Header-only usage: do NOT configure xenium's own project (it
+        # registers a gtest ctest entry against a binary we never build).
+        SOURCE_SUBDIR  use-include-dir-only)
     FetchContent_MakeAvailable(rigtorp_spsc moodycamel_rwq moodycamel_cq
                                rigtorp_mpmc xenium)
 
