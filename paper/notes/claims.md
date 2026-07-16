@@ -8,96 +8,107 @@ Nothing enters main.tex without a row here. Status: HYPOTHESIS → MEASURED
 
 | # | Claim | Status | Evidence |
 |---|-------|--------|----------|
-| H1 | Progress guarantees are invisible under dedicated cores (≤8 threads) but dominate tail latency under oversubscription: the FAA/ticket queue's blocking-on-slot design degrades disproportionately vs Michael–Scott (lock-free) at ×2/×4 oversubscription. | **MEASURED — INVERTED** (see F1) | matrix_v1.csv (k=5); summary_v1.md |
-| H2 | P/E-core asymmetry (steered via macOS QoS) shifts the throughput ranking of the designs; results measured on symmetric x86 servers do not transfer unchanged to client ARM. | **MEASURED — CONFIRMED, stronger than expected** (see F2) | matrix_v1.csv qos rows |
-| H3 | Node-based MS pays allocation + pointer-chasing costs that array queues avoid, but its unboundedness converts back-pressure stalls into memory growth — a different failure mode, not a faster/slower verdict. | PARTIAL (MS mid-to-low throughput everywhere; memory-growth axis not yet instrumented) | summary_v1.md ratio table |
-| H4 | On a fanless machine, uncontrolled trial ordering biases cross-queue comparisons measurably (thermal drift); round-robin interleaving bounds this. | MEASURED, needs decomposition — calib spans 97–172 ms across the run, but see caveat C1 (placement vs thermal) | fig_calib_v1; matrix_v1.csv calib_ns |
-| H5 | The ARM weak memory model makes memory-ordering bugs *observable* that x86 masks; TSan + per-producer sequence invariants are the validation floor. | SUPPORTED (SPSC phase precedent) | learn/03 §7; CI matrix |
+| H1 | **Historical a priori hypothesis:** the FAA/ticket queue's irrevocable reservation would degrade disproportionately under oversubscription relative to MS and the CAS ring. **Taxonomy correction:** Vyukov explicitly lacks a formal lock-free guarantee too, so only the MS algorithmic core is a formal progress-class contrast; FAA versus Vyukov is a reservation-structure comparison. | **MEASURED — DIRECTION INVERTED, TAXONOMY CORRECTED** (see F1) | matrix_v1.csv (k=5); summary_v1.md; `include/mpmc/vyukov_queue.hpp`; Vyukov source note |
+| H2 | Requested macOS interactive/background QoS policy shifts throughput rankings on this M2 system. The historical harness did not record QoS-call success or actual core residency, so it cannot identify P/E asymmetry as the cause. | **MEASURED — CONFIRMED AS A REQUESTED-QoS EFFECT** (see F2) | matrix_v2.csv QoS rows |
+| H3 | This MS+EBR implementation trades the absence of a strict capacity bound for large full-trial peak RSS in consumer-heavy shapes. RSS does not identify the contribution of live nodes, retired limbo, metadata, or allocator behavior, and the experiment does not isolate allocation or pointer-chasing costs. | **MEASURED WITH IMPLEMENTATION-SCOPE CAVEATS** | matrix_v2.csv peak RSS; matrix_h3.csv within-build remediation |
+| H4 | On a fanless machine, environment drift and fixed trial order can bias comparisons. Shape-wise interleaving and calibration keep arms close in time and screen drift, but fixed queue order does not eliminate position bias. | MEASURED, with limitation — calib spans 97–172 ms in v1; see C1 and v2 update | fig_calib_v1/v2; matrix_v1.csv; matrix_v2.csv |
+| H5 | Cross-platform stress tests, TSan, and sequence invariants are a validation floor, not a proof of linearizability or progress. | SUPPORTED AS VALIDATION PRACTICE | CI matrix; stress tests |
 
-## FINDINGS from matrix v1 (k=5, 410/410 runs, 2026-07-05) — the paper's spine
+## Findings first observed in v1 and checked in later datasets
 
 | # | Finding | Numbers (medians) | Status |
 |---|---------|-------------------|--------|
-| **F1** | **H1 inverted, capacity-mediated: wait-free CLAIMING beats lock-free RETRY under preemption — given queue capacity to absorb scheduling gaps.** Vyukov (lock-free CAS) collapses under oversubscription while the blocking-on-slot FAA queue *improves* and posts the best tail by 3–6×. Mechanism hypothesis: preempted CAS losers burn scheduler quanta re-fighting for the cursor line across 32 threads, while FAA's fetch_add always succeeds and its spin-then-yield slot waits hand quanta back. Naively applied, the progress-guarantee taxonomy mispredicts this platform. | 4P:4C throughput ×1→×4: FAA 16.0→31.2 (+94%), Vyukov 8.6→1.5 (−83%), mutex 19.7→14.7, MS 7.3→5.4. p99.9 @×4: FAA 18 ms vs Vyukov 59 / mutex 72 / MS 81 / moody 116 ms | **VERIFIED** (v2, k=8: throughput replicates within ~6%; FAA 16.5→29.2, Vyukov 7.8→1.7. Capacity control REFINES it: at cap 64 FAA collapses to 2.57 — blocking-on-slot re-emerges exactly as originally predicted when slack vanishes; at cap 8192 FAA 20.4, non-monotone. State F1 as capacity-conditional.) |
-| **F2** | **E-core placement reorders the ranking; FAA is placement-immune.** all-int → all-bg: FAA 16.2→15.6 (−4%), mutex 19.8→2.65 (−87%), Vyukov 8.6→0.53 (−94%), moody 8.2→1.8, MS 7.2→2.8. On E-cores FAA is ~6× the mutex and ~30× Vyukov. | qos table appended below | MEASURED |
-| **F3** | **On dedicated cores at moderate mixed ratios the mutex baseline beats every lock-free MPMC design** (4:4: mutex 19.7 vs FAA 16.0, Vyukov 8.6, moody 7.9, MS 7.3). Lock-free wins only at 1:1 (FAA 123, Vyukov 117, mutex 32) and producer-heavy 7:1. "Lock-free is faster" is a 1:1 artifact here. | summary_v1.md ratio table | MEASURED |
-| **F4** | SPSC 1:1 baseline (361 Mops/s) ≈ 3× the best MPMC at 1:1 (FAA 123) — the measured price of MPMC generality on this SoC. | summary_v1.md | MEASURED |
+| **F1** | **Capacity-mediated oversubscription contrast:** at capacity 1024, FAA/ticket improves while the CAS-reservation ring collapses. Both bounded protocols can block after reservation; this is not a formal lock-free-versus-blocking comparison. Parent controls show that one yield policy does not rescue Vyukov and FAA is not necessary for the ticket arm's rising profile. Cross-family evidence is consistent with ticket/turn coordination but does not isolate it. | 4P:4C throughput ×1→×4: v1 FAA 16.0→31.2 (+94%), Vyukov 8.6→1.5 (−83%); v2 FAA 16.5→29.2, Vyukov 7.8→1.7; v3 FAA 16.5→29.7, Vyukov 7.9→1.7. Complete-sample v3 p99.9: CAS/ticket 14.1 ms, FAA 14.2, next-best mutex 69.5. | **REPLICATED DIRECTIONALLY**. At cap 64 both ticket arms fall to 2.6; at cap 8192 they remain above cap 64 but below cap 1024. Three capacities show a boundary, not an iff law. |
+| **F2** | **Requested QoS policy reorders the ranking.** Canonical v2 all-int → all-bg: FAA 16.71→14.69 (−12%), mutex 19.11→3.62 (−81%), Vyukov 8.09→0.46 (−94%). Under background QoS FAA is ~4× the mutex and ~32× Vyukov. The historical rows do not record call success, and this cannot be relabeled an E-core result without residency traces. | matrix_v2.csv QoS rows; v1 replication table appended below | MEASURED |
+| **F3** | **The bounded mutex leads every tested MPMC arm at exactly the 4:4 and 2:6 ×1 shapes.** At 2:2, FAA and Vyukov still exceed the mutex; FAA also leads at 1:7, 6:2, and 7:1. The 1:1 ranking is not representative of all ratios, but neither is a universal mutex win. | matrix_v2.csv, trials 1–7, capacity 1024 | MEASURED |
+| **F4** | At the only shape where SPSC is legal, its v2 median is 373.6 Mops/s versus 127.7 for the best MPMC arm (FAA), a 2.93× specialization gap in this harness rather than a universal “price of MPMC.” | matrix_v2.csv, trials 1--7, capacity 1024 | MEASURED |
 
 **Caveat C1 (calibration decomposition):** calib_ns spans 97–172 ms (~1.77×),
-suspiciously close to a plausible P/E-core performance ratio. The calibration
-loop runs on the fresh process's main thread with *default* QoS, so some of the
-"drift" may be placement (main thread on an E-core), not thermal throttling.
-Phase F: pin calibration to USER_INTERACTIVE; until then, do not cite calib
-drift as purely thermal.
+large enough that scheduler placement was a plausible confounder. The
+calibration loop runs on the fresh process's main thread with *default* QoS, so
+some of the "drift" is scheduling rather than thermal throttling. Phase F assigns
+USER_INTERACTIVE; without residency/frequency/temperature data, do not label
+either range as a particular core class or as purely thermal.
 
 **Caveat C2 (launcher QoS inheritance — v1 latency absolutes are confounded):**
 v2's explicit `QOS_CLASS_DEFAULT` reset after calibration lifted worker threads
-out of QoS inherited from the background launcher shell. Result: dedicated-core
+out of QoS inherited from the background launcher shell. Result: ×1
 p99.9 dropped 10–30x (v1: 7–10 ms; v2: 0.27–0.66 ms). v1 cross-queue
-*comparisons* stay valid (all arms equally penalized, interleaved), but **all
-absolute latency numbers cite v2 only**. Paper methodology gets a paragraph:
+comparisons are at most directional; **all absolute latency numbers cite v2 or
+v3 only**. Paper methodology gets a paragraph:
 "on macOS, worker QoS silently inherits from the launcher; reset it explicitly."
 
-**H3 CONFIRMED with mechanism (v2 RSS column):** MS peak RSS 376 MB (1:1),
+**H3 CONFIRMED as an end-to-end implementation metric (v2 RSS column):** MS
+process peak RSS 376 MB (1:1),
 742 MB (1:7), 680 MB (2:6) in 2-second runs vs 1–2 MB for every bounded queue.
-The asymmetry (7 MB at 7:1 vs 742 MB at 1:7) localizes the mechanism: EBR epoch
-advancement requires every pinned thread to sit at the current epoch, so
-reclamation starves as the count of concurrently pinned consumers grows.
-Unboundedness converts back-pressure into memory growth, and EBR converts
-consumer parallelism into reclamation lag.
+The asymmetry (7 MB at 7:1 vs 742 MB at 1:7) implicates the dequeue-side EBR
+path. RSS does not separate live nodes, retired limbo, vector/allocator capacity,
+or transient TLS-to-orphan handoff. It is read after drain and thread exit, so
+the paper reports full-trial process peak RSS rather than steady-state queue
+footprint.
 
-**Edge finding (moody, cap 64, x4):** moodycamel::ConcurrentQueue exceeded the
-120 s timeout in 7/8 rounds at capacity 64 under x4 oversubscription (wedged in
-the drain/poison phase — its block-pool semantics interact badly with a tiny
-capacity hint and saturated implicit producers). Reported as configuration
-incompatibility, not scored.
+**Edge finding (moody, capacity argument 64, x4):**
+moodycamel::ConcurrentQueue completed the v2 warmup but no measured round before
+the 120 s timeout (drain/poison phase). Its constructor argument is a
+preallocation estimate, not a strict capacity. Report as a harness/configuration
+incompatibility, not a capacity result or score.
 
-**C1 update (v2):** after pinning the probe to USER_INTERACTIVE, calib spread
-narrowed 97–172 → 93–148 ms. Placement explained part; the residual ~1.6x is
-genuine thermal/DVFS. Calib remains an environment-health screen; cross-queue
-fairness rests on interleaving.
+**C1 update (v2):** after requesting USER_INTERACTIVE for the calibration probe, calib spread
+narrowed 97–172 → 93–148 ms. Scheduling explained part; the residual can mix
+DVFS, temperature, and placement. Per-queue calibration medians differ ~1.6%,
+but queue order is fixed, so calibration screens rather than eliminates bias.
 
-| **F5** | **Fairness for free: FAA ticketing is near-perfectly fair; sub-queue designs trade fairness for throughput.** Per-producer push-count CoV: FAA <=0.008 everywhere (incl. x4); at 4:4 x4 others degrade (MS 0.14, Vyukov 0.12, moody 0.13, mutex 0.08); moody structurally unfair at producer-heavy shapes (0.18-0.19 at 6:2/7:1 — per-producer sub-queues). | v2 fair_cov column | MEASURED (v2; v1 spot-check pending if needed) |
-| **F6-lite** | Which role tolerates E-cores is design-specific: MS collapses with producers demoted (2.1 vs 4.3 — allocation is producer-side); moody the opposite (4.5 vs 2.1 — consumer-side block recycling). One paragraph in Results, not a headline. | v2 qos prod-bg/cons-bg rows | MEASURED |
+**F2 round-level outlier:** one of seven v2 all-background rounds was a severe
+collapse: FAA completed zero real messages; Vyukov, mutex, and moodycamel
+reported 0.092, 0.174, and 0.253 Mops/s; MS remained at 2.65. FAA led the other
+six paired rounds. Median/IQR claims describe the central response, not
+round-level reliability under background scheduling.
+
+| **F5** | **FAA has the lowest finite-window producer-count CoV at plotted 4:4/capacity-1024 conditions.** v3 medians: FAA 0.0017 (×1), 0.0076 (×4); CAS/ticket 0.014/0.010. Other ×4 arms span 0.073–0.150. This is empirical work balance, not starvation freedom or fairness by construction; fast threads may claim more tickets and startup is skewed. | matrix_v3.csv fair_cov, capacity 1024 | MEASURED |
+| **F6-lite** | Role-specific QoS sensitivity is design-specific: MS is lower with producers background than consumers background (2.1 vs 4.3); moody shows the opposite (4.5 vs 2.1). Allocation/recycling explanations are plausible but unmeasured. | v2 QoS prod-bg/cons-bg rows | MEASURED |
 | **F7-lite** | The contention cliff: 1:1 -> 2:2 erases ~79% of FAA/Vyukov throughput (127.7->26.3, 118.4->25.2) but only ~33% of the mutex's — sharpens F3's "1:1 mirage" framing. | v2 ratio table | MEASURED |
 
-**H4 SUPPORTED (v2):** per-queue median throughput varies <=±5% across the 8
-trial rounds with no monotone decline; median per-config CoV 2.0% (p90 6.4%,
-worst 20.7% = moody 7:1, its unfairness makes it noisy). The interleaving +
-cooldown protocol held.
+**H4 SCREEN (v2):** there is no monotone matrix-long calibration decline and
+per-queue calibration medians differ ~1.6%. This reduces concern about drift,
+but fixed queue order remains an internal-validity threat; do not claim the
+interleaving protocol removed thermal bias.
 
-## F1-ATTRIBUTION (matrix v3, k=8, controls; 2026-07-07) — the decomposition
+## F1 evidence from parent controls (matrix v3, k=8 total; 2026-07-07)
 
-Two single-variable controls decompose the oversubscription inversion:
+Each control changes one property relative to its own parent. There is no
+single-variable bridge between the Vyukov and ticket protocols:
 
 | Arm | Claim | Completion | Spin policy | x1 -> x4 Mops/s | p99.9 @x4 |
 |---|---|---|---|---|---|
-| vyukov | CAS | shared-cursor | raw retry | 7.88 -> 1.66 | 68.7 ms |
-| **vyukov-b** | CAS | shared-cursor | **+yield** | 8.00 -> 1.68 | 67.5 ms |
+| vyukov | CAS | shared-cursor | raw retry | 7.88 -> 1.66 | 70.6 ms |
+| **vyukov-b** | CAS | shared-cursor | **+yield** | 8.00 -> 1.68 | 75.0 ms |
 | **casticket** | **CAS** | ticket/turn | spin+yield | 7.06 -> 19.33 | 14.1 ms |
 | faa | FAA | ticket/turn | spin+yield | 16.46 -> 29.68 | 14.2 ms |
 
-**Verdicts (each row differs from a neighbor in exactly one property):**
-1. **Spin policy: eliminated.** Backoff+yield changes nothing for Vyukov
-   (identical throughput, tails, E-core collapse 0.48 vs 0.55). The reviewer
-   objection "did you try backoff?" is answered with data.
-2. **The ticket/turn slot discipline carries the robustness.** casticket keeps
-   the rising-under-oversubscription profile, the 14 ms tail, and E-core
-   immunity (12.99 Mops/s all-bg) despite using CAS -- architecture, not
-   primitive, prevents the collapse.
-3. **The FAA primitive buys ~2x throughput within the architecture** (29.7 vs
-   19.3 at x4; 16.5 vs 7.1 at x1) -- counters: casticket loses ~1.0
-   claim-CAS/op where FAA loses exactly 0.
-4. Mechanism counters (v3s): vyukov pays 0.7 CAS-fails + 1.8 cursor re-reads
-   per op (both on shared lines) vs ticket designs' ~0.06 secondary ops --
-   the coherence-storm explanation is now measured, not hypothesized. Also:
-   raw vyukov at x4 shows FEWER involuntary switches than vyukov-b while both
-   collapse -- quanta hoarding is not the failure mode; shared-line traffic is.
+**Bounded verdicts:**
+1. **One yielding policy does not rescue Vyukov.** Vyukov-backoff follows the
+   same throughput collapse (8.00 → 1.68 versus 7.88 → 1.66). Complete-sample
+   p99.9 is 75.0 versus 70.6 ms; do not call tails identical.
+2. **FAA is not necessary for the ticket parent's qualitative profile.**
+   CAS/ticket rises 7.06 → 19.33 and keeps a 14.1 ms tail. This supports, but
+   does not isolate, the shared ticket/turn protocol because cross-family
+   implementations differ in more than one property.
+3. **FAA is faster within the ticket parent pair**, by 2.3x at x1 and 1.5x at
+   x4; avoid the blanket “~2x everywhere” claim.
+4. **Mechanism data are diagnostic only.** Canonical v3s is a complete 1.5 s
+   run with one warmup + two measured rounds. At x4, Vyukov records 0.7515 CAS
+   failures and 1.68695 cursor rereads per completed message; FAA records zero
+   claim failures and 0.057 slot-yield events/message. A slot yield follows
+   1024 loads, so event types are not unit-cost comparable. Shared atomic
+   counters perturb retry paths. Median ivcsw is Vyukov 84.9k,
+   Vyukov-backoff 57.0k, FAA 919.9k: differing raw switch counts do not explain
+   the throughput order, but no causal coherence claim follows.
 
-F1 final form for the paper: *on this platform, preemption- and placement-
-robustness comes from the ticket/turn slot discipline; the FAA primitive is a
-~2x throughput multiplier within it; progress-guarantee class and spin policy
-predict nothing.* v3 is also the third replication of F1/F2/F3 headline shapes.
+F1 paper form: *At capacity 1024 on this system, ticket arms rise under
+oversubscription while the CAS-reservation ring collapses; a yield policy does
+not rescue the latter, FAA is not required for the ticket profile, and capacity
+64 removes the advantage. The broader ticket/turn explanation is consistent
+with controls and diagnostics, not isolated causally.*
 
 ## F8 — the reclamation remediation (matrix_h3, k=8; 2026-07-13)
 
@@ -110,20 +121,26 @@ Three-way A/B/C at the pathological shapes (RSS MB medians | throughput Mops/s):
 | 4:4 | 24 \| 6.3 | 11 \| 5.5 | 165 \| 5.5 | fix: RSS −52%, throughput −13% |
 | 1:1 | 541 \| 11.8 | 526 \| 11.3 | 552 \| 11.9 | **no RSS change — see boundary** |
 
-- **The fix** (O(freed) prefix reclamation; valid because per-thread retire
-  epochs are nondecreasing) resolves the consumer-heavy pathology by breaking
-  the cost feedback loop: O(limbo) maintenance → longer pins → rarer aligned
-  instants → stuck epoch → bigger limbo.
-- **Two failed attempts documented** (kept as the measured `ms-retry` arm):
-  retrying advancement while self-pinned is doomed (the epoch cannot pass your
-  own pin twice), and heavy retry machinery taxes every pin via registry-scan
-  coherence traffic — worse on BOTH axes at every consumer-heavy shape.
-- **Boundary (honest scope):** at 1:1 the backlog persists (~530 MB) — with a
-  single retiring thread, reclamation is advance-ATTEMPT-RATE-bound, not
-  cost-bound. Fixing that needs attempts from non-retiring threads
-  (producer-side/amortized advance) — stated as future work, not claimed.
-- Legacy bimodality confirmed at 4:4 (min 15 / max 56 MB) consistent with the
-  tipping-point dynamic.
+- **Prefix mode:** legacy unconditionally scans/compacts O(limbo). Prefix mode
+  returns O(1) if nothing expires; otherwise it visits expired entries and
+  `vector::erase` shifts survivors, so it is not generally O(freed). The 1:7
+  and 2:6 A/B result strongly implicates scan cost, but limbo size, maintenance
+  time, and live-node count were not recorded. Describe the feedback loop as
+  code-path analysis consistent with the data, not directly measured causality.
+- **Tradeoff:** at 4:4 RSS falls 52% but end-to-end throughput falls 13%.
+  Throughput includes post-stop drain, joins, and TLS EBR teardown, so gains are
+  not exclusively in-window consumer speed. `ru_maxrss` after teardown can
+  include transient orphan-vector handoff.
+- **Failed `ms-retry` bundle:** prefix scan + deferred-unpinned maintenance +
+  up to 64 pressure retries + an advancement/registry scan every 256 pins. It
+  is worse at consumer-heavy shapes. Because it changes several mechanisms, it
+  rejects the bundle but does not isolate which component caused the loss. Its
+  maintenance runs only after leaving the protected region, so no
+  component-level failure mechanism follows from these aggregate results.
+- **Boundary:** at 1:1 legacy and prefix both remain around 530 MB. This is
+  consistent with insufficient advancement attempts, not proven; leave it
+  unresolved. Legacy h3 4:4 ranges 15–56 MB, which shows variability but does
+  not establish a bimodal/tipping-point distribution.
 
 **Phase F remaining:** (1) ~~results prose~~ DONE 2026-07-07 (main.tex fully drafted from v2); (2) ARTIFACT.md; (3) venue deadline check; (4) human rewrite pass; (5) optional: fairness figure for F5, cross-machine invitation via artifact.
 
@@ -145,9 +162,14 @@ Three-way A/B/C at the pathological shapes (RSS MB medians | throughput Mops/s):
 
 ## Progress-guarantee taxonomy (Design section table; precision matters)
 
-- Michael–Scott: lock-free enqueue+dequeue; unbounded; EBR reclamation (stalled
-  thread delays frees — interacts with H1!).
-- Vyukov bounded: lock-free via bounded CAS retry; not wait-free.
-- FAA/ticket: wait-free ticket acquisition; blocking-on-slot completion (a
-  preempted claimant blocks the successor of that slot).
-- Baselines: mutex+std::queue (blocking); our SPSC (wait-free, 1:1 only).
+- Michael–Scott's pointer algorithm has lock-free enqueue/dequeue. This
+  implementation also allocates and performs vector-backed EBR maintenance
+  with a cold-path orphan mutex, so do not assign the complete operation a pure
+  formal lock-free guarantee.
+- Vyukov bounded ring: mutex-free CAS reservation, **explicitly not formally
+  lock-free** per its author. A thread can reserve before publishing its cell.
+- FAA/ticket: wait-free ticket acquisition only; completion is blocking-on-cell
+  because tickets are irrevocable.
+- Moodycamel: contextual industrial arm; not globally linearizable across
+  producers, and constructor capacity is a preallocation estimate.
+- Baselines: bounded mutex+queue (blocking); SPSC (1:1 specialization only).

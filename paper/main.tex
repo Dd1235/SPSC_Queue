@@ -1,13 +1,14 @@
-% MPMC queue tradeoffs on asymmetric client silicon -- IEEEtran.
+% MPMC queue tradeoffs on an Apple M2 system -- IEEEtran.
 % Build: tectonic paper/main.tex   (figures come from scripts/make_plots.py)
 %
 % AUTHORSHIP NOTE (do not delete): drafts in this file are scaffolding produced
 % with AI assistance. Before any submission the human author must verify every
 % claim against paper/notes/claims.md and the data in paper/data/, rewrite the
 % prose in their own voice, and check the venue's AI-disclosure policy.
-% Every number below is traceable: matrix_v2.csv (full matrix, k=8),
-% matrix_v3.csv (focus matrix with control arms, k=8), matrix_v3s.csv
-% (instrumented mechanism dataset), matrix_v1.csv (first replication);
+% Every number below is traceable: matrix_v2.csv (full matrix, 7 kept rounds),
+% matrix_v3.csv (controls, 7 kept rounds), matrix_h3.csv (reclamation,
+% 7 kept rounds), matrix_v3s.csv (1.5 s instrumented profile, 2 kept rounds),
+% and matrix_v1.csv (first replication);
 % aggregation = scripts/make_plots.py; claim->data map = notes/claims.md.
 \documentclass[conference]{IEEEtran}
 
@@ -17,8 +18,8 @@
 \usepackage[hidelinks]{hyperref}
 
 \newcommand{\figtag}{v2} % default dataset tag; per-figure tags override below
-% Datasets: v2 = full-matrix headline (k=8); v3 = focus matrix with the two
-% control arms (k=8); v3s = instrumented-build mechanism dataset.
+% Datasets: v2 = full-matrix headline; v3 = control matrix; h3 = reclamation
+% modes; v3s = short diagnostic stats-build profile.
 
 \newcommand{\maybefig}[3][\figtag]{%
   \IfFileExists{assets/#2_#1.pdf}%
@@ -28,83 +29,74 @@
 
 \begin{document}
 
-\title{MPMC Queue Tradeoffs on Asymmetric Client Silicon:\\
-A Characterization Study on Apple M2}
+\title{MPMC Queue Tradeoffs on an Apple M2 System:\\
+A Reproducible Characterization}
 
 \author{\IEEEauthorblockN{Dedeepya Avancha}
-\IEEEauthorblockA{Independent / [affiliation]\\
+\IEEEauthorblockA{Independent Researcher\\
 dedeepyaavancha@gmail.com}}
 
 \maketitle
 
 \begin{abstract}
-Published evaluations of concurrent queues overwhelmingly assume symmetric x86
-server cores, pinned threads, and active cooling. Client devices violate all
-three. We characterize four classic multi-producer/multi-consumer designs---a
-mutex-guarded queue, the Michael--Scott lock-free queue with epoch-based
-reclamation, Vyukov's bounded CAS queue, and a fetch-and-add (FAA) ticket
-queue---plus an industrial reference, on an Apple M2 (4 performance + 4
-efficiency cores), across producer:consumer ratios, QoS-steered core placement,
-and oversubscription, using coordinated-omission-aware latency measurement and
-thermally interleaved trials. Three results contradict the textbook ranking.
-(1)~Our pre-registered hypothesis---that the FAA ticket queue's
-blocking-on-slot completion would collapse under preemption---\emph{inverted}:
-under $4\times$ oversubscription the FAA queue improved by 77--94\% while the
-lock-free CAS queue lost ${\sim}80\%$, with a ${\sim}5\times$ tail advantage.
-Two single-variable controls decompose the inversion: a yielding-backoff
-variant of the CAS queue changes nothing (spin policy eliminated), while a
-CAS-claim variant of the ticket queue retains the robustness (the ticket/turn
-slot discipline, not the atomic primitive, prevents the collapse) at half the
-throughput (the FAA primitive's measured contribution). Instrumented builds
-confirm the mechanism: the CAS queue pays 0.7 failed CASes plus 1.8
-shared-cursor re-reads per operation, where ticket designs wait on private
-cells. A capacity control bounds the finding: with only 64 slots of slack,
-blocking-on-slot re-emerges and the textbook prediction returns. (2)~Efficiency-core
-placement reorders the ranking entirely: the FAA queue retains 96\% of its
-throughput on E-cores while the mutex retains 13\% and the CAS queue 6\%.
-(3)~At moderate mixed ratios on dedicated cores, the mutex baseline beats every
-lock-free design. We additionally measure the unbounded queue's true failure
-mode (742\,MB resident growth in a two-second run, traced to epoch-reclamation
-starvation under consumer parallelism) and near-perfect producer fairness for
-FAA ticketing. All results reproduce with one command from our open artifact.
+Influential concurrent-queue evaluations often use symmetric server systems,
+thread affinity, and active cooling. We instead characterize four MPMC
+designs---a bounded mutex queue, Michael--Scott with epoch-based reclamation,
+Vyukov's bounded CAS-reservation queue, and an FAA ticket queue---plus an
+industrial reference on one fanless Apple M2 client system. The matrix varies
+producer:consumer ratio, oversubscription, capacity, and macOS QoS policy; QoS
+is a scheduling policy, not observed core placement. Trials are process
+isolated, interleaved by shape with cooldowns, and use schedule-to-dequeue latency to avoid
+coordinated omission. At capacity 1024, $4\times$ oversubscription increased
+FAA-ticket throughput by 77--94\% across three matrices while the CAS-reservation
+queue lost about 80\%; the ticket arms also had roughly a $5\times$ lower
+p99.9 than the next alternative. Both bounded algorithms lack a formal
+lock-free progress guarantee, so this is a coordination-structure result, not
+a progress-class comparison. Parent controls show that yielding backoff does
+not rescue the CAS design and that FAA is not necessary for the ticket design's
+qualitative profile; at capacity 64, however, both ticket variants collapse.
+Requesting background rather than interactive QoS for all workers reverses the ranking,
+although the experiment cannot attribute that change to a particular core
+class. The mutex leads at the tested 4:4 and 2:6 $\times1$ shapes. Finally, the
+Michael--Scott implementation reaches 742\,MB median peak RSS after a two-second
+producer interval; replacing its unconditional limbo scan with prefix
+reclamation cuts peak RSS by 76--82\% at consumer-heavy shapes and raises
+end-to-end throughput by 28--76\%. The artifact provides raw CSVs, claim checks,
+and scripted experiment profiles.
 \end{abstract}
 
 \section{Introduction}
-Lock-free queues are folklore-fast: compare-and-swap beats locks, stronger
-progress guarantees cost complexity but buy robustness. That folklore was
-established on server-class symmetric multiprocessors with pinned threads.
-Most software instead runs on client silicon: heterogeneous cores, opaque OS
-scheduling, passive cooling.
+``Lock-free'' is often used as performance shorthand: atomic operations should
+beat a mutex, and a stronger progress guarantee should be more robust to
+preemption. Neither inference follows from the definition. Client systems also
+add heterogeneous cores, OS-controlled scheduling, and thermal limits that are
+absent from many server-oriented evaluations.
 
-This paper asks a narrow, answerable question: \emph{how much of the textbook
-MPMC-queue tradeoff story survives contact with an asymmetric, unpinnable,
-thermally limited client SoC?} We claim no algorithmic novelty; the
-contribution is a careful characterization, two methodology pitfalls we
-document for others, and a reproducible artifact.
+This paper asks a narrow question: \emph{how do representative MPMC queue
+tradeoffs change on one unpinnable, passively cooled Apple M2 system under
+ratio, load, capacity, and scheduler-policy changes?} This is a case study, not
+a general ranking or a claim of algorithmic novelty. Its contribution is the
+characterization, the controls and boundaries around its explanations, two
+methodology pitfalls, and a reproducible artifact.
 
 Contributions:
 \begin{itemize}
-  \item A four-design comparison (blocking, lock-free node-based, lock-free
-        array CAS, FAA ticket) in one harness, validated with ThreadSanitizer
-        and invariant-checking stress tests, with
-        \texttt{moodycamel::ConcurrentQueue} as an industrial reference and an
-        SPSC queue as the specialization baseline.
-  \item A client-silicon methodology: QoS-class core steering, oversubscription
+  \item A four-design comparison (bounded mutex, node-based Michael--Scott,
+        bounded CAS reservation, and FAA ticket) in one harness, with
+        ThreadSanitizer and invariant-checking stress tests. An SPSC queue is a
+        specialization baseline; \texttt{moodycamel::ConcurrentQueue} is a
+        contextual industrial reference with different ordering semantics.
+  \item A client-silicon methodology: QoS-policy steering, oversubscription
         as a preemption proxy, coordinated-omission-aware paced latency,
-        process-per-trial isolation, thermal round-robin interleaving with a
-        pinned calibration probe---plus two measured confounders (probe
-        placement; launcher QoS inheritance) that silently distort na\"ive
+        process-per-trial isolation, shape-wise interleaving with cooldowns and a
+        QoS-steered calibration probe---plus two measured confounders (probe
+        scheduling; launcher QoS inheritance) that silently distort na\"ive
         setups on macOS.
-  \item Findings F1--F5 (Sec.~\ref{sec:results}), including a controlled
-        decomposition of the central surprise: preemption robustness is a
-        property of the ticket/turn \emph{slot discipline}, not of the claim
-        primitive, spin policy, or progress-guarantee class --- established
-        with two single-variable control variants and per-operation retry
-        counters, and bounded by a capacity control. Plus: the E-core
-        reordering; the mutex winning the dedicated-core middle; memory (not
-        speed) as the unbounded design's failure mode, traced to
-        epoch-advancement starvation; and fairness as a free consequence of
-        ticketing.
+  \item Empirical boundaries rather than a universal winner: a
+        capacity-dependent ticket/CAS contrast under oversubscription; ranking
+        changes under QoS policy; mutex wins at two mixed-ratio shapes; and an
+        implementation-specific reclamation pathology analyzed with a
+        successful prefix change and a failed heavier remediation.
 \end{itemize}
 
 \section{Background and Related Work}
@@ -117,7 +109,9 @@ safe memory reclamation --- hazard pointers \cite{michael2004}, epochs
 lineage's practical tax, and our results show it becoming the binding
 constraint (Sec.~\ref{sec:mem}). Array-based designs begin with Tsigas and
 Zhang \cite{tsigas2001}; Vyukov's bounded queue \cite{vyukov} popularized
-per-cell sequence coordination. Fetch-and-add designs exploit FAA's
+per-cell sequence coordination. Its author explicitly does not claim formal
+lock freedom: a reservation can be visible before its cell is published.
+Fetch-and-add designs exploit FAA's
 always-succeeds property, from the LMAX Disruptor's industrial sequencer
 \cite{thompson2011} to LCRQ \cite{morrison2013} and SCQ \cite{nikolaev2019};
 flat combining \cite{hendler2010} reframes the contention question entirely.
@@ -128,15 +122,15 @@ industrial practice.
 cross-platform synchronization study \cite{david2013}, which showed
 synchronization conclusions to be strongly hardware-dependent, and Guiroux et
 al.\ \cite{guiroux2016}, who showed lock rankings shift with workload and
-machine --- both on symmetric servers. We extend the genre's central lesson
-to asymmetric client silicon.
+machine. We test the same general lesson in one client-system case study.
 
 \textbf{Asymmetric multicores.} Single-ISA heterogeneous processors were
 studied for energy scheduling well before they reached the desktop
 \cite{fedorova2009}; ARM's big.LITTLE \cite{greenhalgh2011} and Intel's hybrid
 Alder Lake \cite{rotem2022} made them mainstream. That literature concerns
-\emph{scheduler} policy; how heterogeneity reshuffles \emph{lock-free
-algorithm} tradeoffs has received little direct measurement.
+\emph{scheduler} policy. Our case study measures responses to macOS QoS
+policies, but without core-residency traces it cannot isolate heterogeneity
+from other priority and scheduling effects.
 
 \textbf{Methodology.} We follow Hoefler and Belli's reporting guidance
 \cite{hoefler2015}, Tene's coordinated-omission critique \cite{tene}, and take
@@ -144,180 +138,215 @@ Mytkowicz et al.'s warning about invisible experimental bias
 \cite{mytkowicz2009} as standing orders --- Sec.~\ref{sec:method} documents
 two such biases we caught in our own instruments.
 
-\textbf{Gap.} We are not aware of a systematic MPMC queue characterization on
-asymmetric ARM client silicon under OS-controlled placement.
+\textbf{Scope relative to prior work.} The evaluated literature leaves room
+for an artifact-backed MPMC case study on an ARM client system with
+OS-controlled placement. We do not claim an exhaustive literature review.
 
 \section{Queue Designs Under Study}
 \label{sec:designs}
-Table~\ref{tab:designs} summarizes the design space; implementations are
-faithful to the cited algorithms (128-byte padding on hot atomics throughout).
+Table~\ref{tab:designs} summarizes the design space. The custom implementations
+follow the cited protocols and pad their hot shared atomics to 128 bytes.
 
 \begin{table}[t]
-\caption{Design space. ``blk-on-slot'': claiming is wait-free but a preempted
-claimant blocks its slot's successor.}
+\caption{Design space. Progress describes the coordination protocol, not
+allocator, reclamation, or library-internal paths.}
 \label{tab:designs}
 \centering
-\small
+\footnotesize
+\setlength{\tabcolsep}{2.5pt}
 \begin{tabular}{@{}lllll@{}}
 \toprule
 Design & Storage & Claim & Progress & Reclaim \\
 \midrule
-mutex+queue & -- & lock & blocking & none \\
-Michael--Scott & nodes & CAS & lock-free & epochs \\
-Vyukov & array & CAS & lock-free & none \\
-FAA ticket & array & FAA & blk-on-slot & none \\
-moodycamel & blocks & mixed & lock-free & internal \\
+mutex+queue & bdd. deque & lock & blocking & none \\
+Michael--Scott & nodes & CAS & LF core & epochs \\
+Vyukov & bdd. ring & CAS reserv. & blk-on-cell & none \\
+FAA ticket & bdd. ring & FAA reserv. & blk-on-cell & none \\
+moodycamel & blocks & mixed & library-defined & internal \\
 \bottomrule
 \end{tabular}
 \end{table}
 
-Three implementation notes matter for interpretation. \emph{Michael--Scott}
+Four implementation notes matter for interpretation. \emph{Michael--Scott}
 copies the value before its dequeue CAS (per the original) and retires nodes
 through a 3-epoch reclamation scheme whose advancement requires every
 in-operation thread to have observed the current epoch---a property that
-Sec.~\ref{sec:mem} shows becoming the bottleneck. \emph{Vyukov} claims cursor
-positions by CAS with unbounded individual retry. The \emph{FAA ticket} queue's
-claim is a single fetch-and-add (wait-free, no losers); its tickets are
-irrevocable, which makes completion blocking-on-slot and forbids a try-API ---
-our harness therefore terminates consumers with poison pills rather than
-shared counters. To decompose causes rather than compare bundles of
-differences, we additionally build two \emph{single-variable controls}:
+Sec.~\ref{sec:mem} shows becoming costly. Although the Michael--Scott pointer
+protocol is lock-free, allocation, vector-backed EBR maintenance, and an orphan
+list mutex mean this complete implementation is not a pure lock-free operation.
+\emph{Vyukov} reserves cursor positions by CAS with unbounded retry; a thread
+preempted after reservation but before sequence publication can delay a FIFO
+predecessor, so the protocol is mutex-free but not formally lock-free
+\cite{vyukov}. The \emph{FAA ticket} queue reserves with one fetch-and-add (no
+claim losers), but its irrevocable ticket similarly makes completion
+blocking-on-cell and forbids a try-API. The harness therefore terminates
+consumers with poison pills rather than a racy shared counter. We build two
+within-parent controls:
 \textsf{vyukov-b} (Vyukov plus exactly the ticket queue's 1024-spin-then-yield
 politeness in every retry path) and \textsf{casticket} (the ticket queue with
 its fetch-and-add claim replaced by a raw CAS-increment loop). Each control
-differs from its parent in one property only.
+differs from its own parent in one property only; the cross-family comparison
+still differs in reservation, cell protocol, and API semantics. Finally,
+\texttt{moodycamel::ConcurrentQueue} with implicit producers is not globally
+linearizable across producers, and its constructor argument is a preallocation
+estimate rather than a strict bound. We therefore use it as industrial context,
+not a semantics- or capacity-matched arm.
 
 \section{Methodology}
 \label{sec:method}
-\textbf{Platform.} Apple M2 (MacBook Air, passively cooled), 4 P- + 4 E-cores,
-macOS; Apple clang 17, \texttt{-O3}.
+\textbf{Platform.} The reported collection platform was a MacBook Air
+(Mac14,2), Apple M2 (4 P- + 4 E-cores), 8\,GB RAM, passive cooling, macOS
+15.6.1 (24G90), Apple clang 17.0.0, \texttt{-O3}. The historical rows encode
+configuration and time, but not OS/build; the exact OS fields were recorded
+when the same machine was inspected during artifact finalization.
 
-\textbf{Harness.} One process per trial appends one CSV row; the matrix driver
-interleaves queues round-robin \emph{within} each trial round, so cross-queue
-comparisons occur under near-identical thermal state. A fixed
-dependent-arithmetic calibration loop is timed before every trial. Trial~0 per
-configuration is warmup; we report medians with IQR over the remaining trials
-\cite{hoefler2015}. The canonical dataset (v2) contains 8 complete rounds of
-92 configurations; a prior full run (v1) serves as a replication check ---
-headline throughput medians agree within ${\sim}6\%$. Across configurations
-the median coefficient of variation is 2.0\% (p90: 6.4\%).
+\textbf{Harness and metric.} One fresh process measures one configuration and
+appends one self-describing CSV row. The payload is a \texttt{uint64\_t}; the
+default strict capacity is 1024 for the custom bounded queues and mutex (MS
+ignores it, and moodycamel treats it only as a preallocation estimate). In
+saturated mode, the harness launches producers, sleeps for two seconds, signals
+them to stop, drains all accepted messages, sends one poison pill per consumer,
+and joins the consumers. Reported Mops/s is completed real dequeues divided by this full
+makespan---one completed message, not enqueue plus dequeue, counts as one. The
+metric consequently includes startup, drain, and worker/TLS teardown, which is
+important for interpreting MS reclamation.
 
-\textbf{Latency.} Producers are paced against a fixed schedule (offered load
-split across producers, staggered); payloads carry the \emph{scheduled} send
-time, so producer lateness is charged to the reported tail rather than
-omitted \cite{tene}.
+\textbf{Matrix and statistics.} The driver keeps different queues for a shape
+close in time, with 0.3\,s between processes and 2\,s between rounds, but uses a
+fixed queue order rather than randomization. A dependent-arithmetic calibration
+loop precedes every trial. Trial~0 is warmup; points are medians and error bars
+are IQRs over measured trials \cite{hoefler2015}. Headline v2 planned 92
+queue/configuration arms and analyzes 91 after the documented incompatible arm
+is excluded. It uses rounds 0--7 (one warmup plus seven measured); an
+interrupted round~8 remains in the raw file but is excluded. The v3 control
+and h3 reclamation matrices likewise use one warmup plus seven measured rounds,
+apart from explicitly reported timeouts. The earlier v1 matrix (one warmup plus
+four measured rounds) is a replication check. These are descriptive statistics;
+we do not report inferential significance tests.
 
-\textbf{Placement and preemption.} macOS exposes no thread affinity on Apple
-silicon; we steer placement with thread QoS
-(\texttt{USER\_INTERACTIVE}$\,\to\,$P-cores,
-\texttt{BACKGROUND}$\,\to\,$E-cores) and treat it as a bias, not an
-assignment. Oversubscription (both thread counts multiplied at fixed ratio)
-serves as a controlled preemption generator.
+\textbf{Latency.} Producers are staggered and paced at a total offered load of
+1\,M message/s. Payloads carry the \emph{scheduled} send time, so
+schedule-to-dequeue latency charges producer lateness instead of omitting it
+\cite{tene}. The historical v3 executable used fixed per-consumer sample
+buffers. They retained every sample for the ticket and mutex arms, but dropped
+at most 2.17\% in one of seven MS, Vyukov, and Vyukov-backoff trials and two of
+seven moodycamel trials at $4\times$. Because those buffers retained the
+earliest samples, truncation can bias tails downward; the analysis pipeline
+therefore excludes incomplete rows from plotted and quoted latency medians.
+Current HEAD instead uses growable vectors and aborts if the expected, popped,
+and retained counts disagree, but that correction does not alter the committed
+v3 measurements.
 
-\textbf{Two confounders we measured so others can avoid them.}
-(i)~\emph{Probe placement:} with default QoS our calibration loop sometimes
-landed on an E-core; its spread (${\sim}1.77\times$) tracked the P/E speed
-ratio, not temperature. Pinning the probe to interactive QoS narrowed the
-spread; the residual (${\sim}1.6\times$ worst case) is genuine
-frequency/thermal variation. (ii)~\emph{Launcher QoS inheritance:} macOS
-worker threads inherit the spawning thread's QoS. Launched from a background
-shell, all v1 workers ran silently demoted, inflating dedicated-core p99.9 by
-$10$--$30\times$. Explicitly resetting worker QoS
-(\texttt{QOS\_CLASS\_DEFAULT}) fixed this in v2; v1's \emph{cross-queue}
-comparisons survived only because interleaving demoted all arms equally.
-Absolute latencies in this paper cite v2 exclusively.
+\textbf{QoS and oversubscription.} macOS exposes no usable affinity API on this
+system. The historical harness requested \texttt{USER\_INTERACTIVE} or
+\texttt{BACKGROUND} for workers, but did not record the call result, actual core
+residency, or frequency; results are attributed to the requested QoS policy,
+not to P- or E-cores. Current HEAD aborts a new trial if a QoS request fails.
+Multiplying both thread counts at a fixed ratio creates runnable-thread pressure and serves
+as a preemption proxy. Process-level involuntary context switches from
+\texttt{getrusage} corroborate that pressure but are not scheduler traces.
 
-\textbf{Instrumented builds.} Mechanism counters (per-operation CAS
-failures, cursor re-reads, slot-wait yields) are compiled only into a separate
-\emph{stats} binary used for the mechanism dataset (v3s); headline numbers come
-from uninstrumented builds, so the counters cannot perturb them
-\cite{mytkowicz2009}. Involuntary context switches are read from
-\texttt{getrusage} in all builds (no hot-path cost).
+\textbf{Two measured confounders.} (i)~With default QoS, the calibration probe
+spanned ${\sim}1.77\times$; the later probe requesting interactive QoS had a
+narrower range, showing that the original ``thermal'' instrument was also
+sensitive to scheduling policy.
+The residual ${\sim}1.6\times$ can mix DVFS, temperature, and remaining
+placement variation. (ii)~Workers inherit the launcher's QoS. A background
+launcher in v1 was associated with $10$--$30\times$ larger $\times1$ p99.9.
+Before creating workers, v2 requested \texttt{QOS\_CLASS\_DEFAULT} for the
+spawning thread; no absolute latency in the paper comes from v1.
 
-\textbf{Thermal validity.} Median per-queue throughput varies by at most
-$\pm5\%$ across the eight trial rounds with no monotone decline
-(Fig.~\ref{fig:calib} shows the probe trace), indicating the
-interleaving-plus-cooldown protocol kept thermal drift out of the
-comparisons.
+\textbf{Diagnostic build and thermal screen.} Retry, cursor-re-read, and
+slot-yield counters use shared atomic increments in a separate stats binary
+\cite{mytkowicz2009}. The canonical v3s profile is only a 1.5\,s run with one
+warmup plus two measured rounds; its magnitudes are diagnostic and may be
+perturbed by instrumentation. Headline performance is uninstrumented. In v2,
+per-queue calibration medians differ by about 1.6\%, and throughput shows no
+monotone round-wise decline larger than the reported variation. This screen
+reduces concern about drift but cannot remove fixed-order bias.
 
 \section{Results}
 \label{sec:results}
 
-\subsection{Throughput across ratios: the 1:1 mirage (F3)}
+\subsection{Throughput across ratios: the 1:1 mirage}
 \begin{figure}[t]\centering
 \maybefig{fig_throughput_ratio}{\linewidth}
-\caption{Median throughput by P:C ratio, dedicated cores, default QoS.
-Error bars: IQR over 7 kept trials.}
+\caption{Median completed-message throughput by P:C ratio, capacity 1024,
+default QoS. Error bars: IQR over seven measured trials.}
 \label{fig:ratio}
 \end{figure}
-At 1:1 the array-based lock-free queues dominate (FAA 127.7, Vyukov 118.4 vs
-mutex 34.7 Mops/s) --- the configuration folklore is built on. One step to 2:2
-erases ${\sim}79\%$ of both (FAA 26.3, Vyukov 25.2), while the mutex loses only
-a third (23.3). From 2:2 through 4:4 and consumer-heavy mixes, \emph{the mutex
-baseline leads every lock-free MPMC design} (4:4: mutex 19.0 vs FAA 16.5,
-Vyukov 7.8, moodycamel 7.8, MS 6.2). The SPSC baseline (373.6 at 1:1) marks
-the price of MPMC generality: ${\sim}3\times$ over the best MPMC design in
-the only configuration where the comparison is legal.
+At 1:1 the array queues lead (FAA 127.7, Vyukov 118.4 vs mutex 34.7 Mops/s).
+One step to 2:2 erases ${\sim}79\%$ of both (FAA 26.3, Vyukov 25.2), while the
+mutex loses one third (23.3) but does not yet lead. At 4:4 the mutex leads every
+MPMC arm (19.0 vs FAA 16.5, Vyukov and moodycamel 7.8, MS 6.2); it also narrowly
+   leads at 2:6 (15.9 vs FAA 14.6). The SPSC baseline (373.6 at 1:1) is
+${\sim}3\times$ the best MPMC result in the only shape where that specialization
+is legal. Thus neither the 1:1 ranking nor the mutex win is universal even
+within this matrix.
 
-\subsection{Preemption: the progress-guarantee inversion (F1)}
+\subsection{Oversubscription: CAS reservation versus ticket/turn}
 \begin{figure}[t]\centering
 \maybefig[v3]{fig_oversubscription}{0.9\linewidth}
-\caption{Throughput at 4P:4C as thread counts are multiplied beyond the 8
-cores (log--log). Dashed lines: the single-variable control variants.}
+\caption{Throughput at 4P:4C, capacity 1024, as both thread counts are
+multiplied (log--log). Dashed lines are within-parent controls.}
 \label{fig:oversub}
 \end{figure}
 
 \begin{figure}[t]\centering
 \maybefig[v3]{fig_latency_tail}{\linewidth}
-\caption{Paced-load (1\,M\,msg/s) latency percentiles at 4P:4C, dedicated
-(left) vs $4\times$ oversubscribed (right), log scale.}
+\caption{Schedule-to-dequeue percentiles at 1\,M message/s and 4P:4C,
+$\times1$ (left) versus $\times4$ (right), log scale. Plotted and quoted medians
+use complete-sample trials; the pipeline filters historical rows whose operation
+count reveals sample truncation.}
 \label{fig:tail}
 \end{figure}
 
-We pre-registered the textbook prediction: the FAA queue's blocking-on-slot
-completion should degrade disproportionately under preemption, while lock-free
-designs degrade gracefully. The data inverted it, in three independent full
-runs (Fig.~\ref{fig:oversub}): from $\times1$ to $\times4$ oversubscription
-the FAA queue \emph{gained} 77--94\% (v3: 16.5$\,\to\,$29.7 Mops/s) while
-lock-free Vyukov lost ${\sim}80\%$ (7.9$\,\to\,$1.7); the mutex lost 25\%,
-Michael--Scott 12\%. Tails told the same story (Fig.~\ref{fig:tail}): at
-$\times4$, the ticket designs' p99.9 was 14\,ms against 55--70\,ms for every
-alternative.
+Our a priori claims ledger predicted that an irrevocable FAA reservation would
+be especially vulnerable when a claimant is descheduled. Subsequent taxonomy
+review matters: Vyukov also reserves before publishing and is not formally
+lock-free, so the experiment does not invert two formal progress classes. It
+instead contrasts two reservation structures. Across three independently run
+matrices, capacity-1024 FAA throughput rises 77--94\% from $\times1$ to
+$\times4$ (v3: 16.5$\,\to\,$29.7 Mops/s), while Vyukov falls about 80\%
+(7.9$\,\to\,$1.7); the mutex falls 24\% and MS 15\%. In complete-sample
+latency trials, CAS/ticket and FAA/ticket have 14.1 and 14.2\,ms p99.9. The next
+best arm is the mutex at 69.5\,ms; Vyukov, Vyukov-backoff, MS, and moodycamel
+range from 70.6 to 107.5\,ms. The ticket result is therefore about $5\times$
+lower than the nearest alternative, without relying on truncated trials.
 
-\textbf{Attribution by controls (Table~\ref{tab:controls}).} The FAA queue
-differs from Vyukov in two properties at once, so we decompose with the
-single-variable variants. \textsf{vyukov-b} (adds yielding backoff) tracks
-plain Vyukov \emph{identically} --- throughput, tails, and E-core behavior ---
-eliminating spin policy as the cause. \textsf{casticket} (CAS claim, ticket
-completion) \emph{retains} the rising-under-oversubscription profile
-(7.1$\,\to\,$19.3) and the 14\,ms tail: the ticket/turn slot discipline, not
-the atomic primitive, prevents the collapse. The FAA primitive then
-contributes a further ${\sim}2\times$ throughput within that discipline (29.7
-vs 19.3 at $\times4$) --- consistent with the counters, which show
-\textsf{casticket} losing ${\sim}1.0$ claim-CAS per operation where FAA loses
-exactly zero.
+\textbf{Evidence from parent controls (Table~\ref{tab:controls}).}
+\textsf{vyukov-b} changes only Vyukov's retry politeness. It follows the same
+throughput collapse (8.0$\,\to\,$1.7 Mops/s), and its complete-trial p99.9 is
+75.0\,ms versus 70.6\,ms, so this yielding policy does not rescue the design.
+\textsf{casticket} changes only the FAA ticket parent's claim instruction. It
+retains a rising profile (7.1$\,\to\,$19.3) and a 14.1\,ms tail, showing that
+FAA is not necessary for the qualitative ticket result; FAA is nevertheless
+1.5--2.3$\times$ faster than CAS/ticket at the two endpoints. Because no
+single-variable control transforms Vyukov's cell protocol into the ticket/turn
+protocol, these comparisons are \emph{consistent with}, but do not isolate,
+the broader ticket/turn structure as the source of robustness.
 
 \begin{table}[t]
-\caption{The control decomposition (throughput, Mops/s, 4P:4C; tails at
-$\times4$). Each arm differs from a neighbor in exactly one property.}
+\caption{Within-parent controls (Mops/s, 4P:4C, capacity 1024). Tails are
+complete-trial p99.9 medians at $\times4$.}
 \label{tab:controls}
 \centering
 \small
 \begin{tabular}{@{}llrrr@{}}
 \toprule
-Arm & differs by & $\times1$ & $\times4$ & p99.9@$\times4$ \\
+Arm & parent change & $\times1$ & $\times4$ & p99.9@$\times4$ \\
 \midrule
-Vyukov & --- & 7.9 & 1.7 & 68.7\,ms \\
-~+backoff & spin policy & 8.0 & 1.7 & 67.5\,ms \\
-CAS/ticket & completion & 7.1 & 19.3 & 14.1\,ms \\
-FAA/ticket & claim primitive & 16.5 & 29.7 & 14.2\,ms \\
+Vyukov & reference & 7.9 & 1.7 & 70.6\,ms \\
+~+backoff & add yield policy & 8.0 & 1.7 & 75.0\,ms \\
+FAA/ticket & reference & 16.5 & 29.7 & 14.2\,ms \\
+CAS/ticket & FAA$\to$CAS claim & 7.1 & 19.3 & 14.1\,ms \\
 \bottomrule
 \end{tabular}
 \end{table}
 
 \begin{table}[t]
-\caption{The capacity control (throughput, Mops/s, 4P:4C, $\times4$
-oversubscription). FAA's advantage requires slack.}
+\caption{Capacity input control (Mops/s, 4P:4C, $\times4$). MS ignores this
+input; all other shown arms use it as a strict bound.}
 \label{tab:capacity}
 \centering
 \small
@@ -327,145 +356,226 @@ Capacity & FAA & CAS/tkt & Vyukov & MS & mutex \\
 \midrule
 64 & 2.6 & 2.6 & 0.9 & 5.3 & 4.5 \\
 1024 & \textbf{29.7} & 19.3 & 1.7 & 5.2 & 14.7 \\
-8192 & 19.2 & 8.4 & 2.4 & 5.3 & 15.9 \\
+8192 & 19.2 & 8.4 & 2.4 & 5.2 & 15.9 \\
 \bottomrule
 \end{tabular}
 \end{table}
 
-The finding is capacity-conditional (Table~\ref{tab:capacity}): at capacity
-64 \emph{both} ticket designs collapse to 2.6 Mops/s --- with little slack, a
-preempted ticket holder really does block its slot's successors, exactly as
-the taxonomy predicts. \emph{The slot discipline wins under preemption if and
-only if capacity absorbs scheduling gaps.} (Performance is non-monotone in
-capacity --- 8192 is slower than 1024 for both ticket designs --- consistent
-with a larger ring's cache footprint.)
+The finding is capacity-conditional (Table~\ref{tab:capacity}). At capacity 64
+both ticket designs fall to 2.6 Mops/s, consistent with a descheduled ticket
+holder exhausting the available slack. Capacity 1024 gives the strongest
+ticket result among the three values tested; 8192 is slower than 1024 for both
+ticket arms. A larger cache footprint is one plausible explanation for that
+non-monotonicity, but we did not measure cache misses. Three capacities establish
+a boundary in this experiment, not an if-and-only-if law.
 
-\subsection{The mechanism, measured}
+\subsection{Diagnostic mechanism counters}
 \begin{figure}[t]\centering
 \maybefig[v3s]{fig_mechanism}{\linewidth}
-\caption{Instrumented-build dataset: per-op retry/claim failures (left) and
-involuntary context switches per trial (right) vs oversubscription, log scales.}
+\caption{Diagnostic 1.5\,s stats build (one warmup, two measured rounds):
+retry/claim failures per completed message (left) and process involuntary
+context switches (right), log scales.}
 \label{fig:mech}
 \end{figure}
-The instrumented build turns the retry-storm hypothesis into measurement
-(Fig.~\ref{fig:mech}). Vyukov pays ${\sim}0.7$ failed cursor CASes \emph{plus}
-${\sim}1.8$ behind-the-cursor re-reads per operation --- every one a load or RMW
-on one of two shared cache lines --- while the ticket designs' secondary
-traffic is ${\sim}0.06$ per op (waits on \emph{private} cells). Context-switch
-counts rule out the quanta-hoarding explanation: the backoff variant yields
-(76.8k involuntary switches at $\times4$ vs raw Vyukov's 55.5k) yet collapses
-identically, and the fastest design (FAA) shows the \emph{most} preemptions
-(1.24M) --- switches are not the cost; wasted shared-line work is.
+At $\times4$, the canonical stats run records 0.752 failed cursor CASes and
+1.687 behind-cursor re-reads per completed message for Vyukov. Those events
+touch its shared cursors. FAA has exactly zero claim failures by construction;
+its 0.057 recorded slot-yield events per message occur only after 1024 turn
+loads, so event counts across protocols are not unit-cost comparable. The
+process-level median involuntary-switch counts are 84.9k for Vyukov, 57.0k for
+Vyukov-backoff, and 919.9k for FAA. Both CAS variants collapse despite different
+counts, while the fastest arm has far more, so raw switch count does not explain
+the ordering. Together these diagnostics support a shared-cursor-contention
+explanation, but two measured rounds, perturbing atomic counters, and no cache
+coherence measurements preclude a causal claim.
 
-\subsection{Core asymmetry: placement reorders the ranking (F2)}
+\subsection{QoS policy reorders the ranking}
 \begin{figure}[t]\centering
 \maybefig{fig_qos}{\linewidth}
-\caption{Throughput at 4P:4C under QoS placement policies.}
+\caption{Throughput at 4P:4C, capacity 1024, under requested macOS QoS
+policies; historical call success and actual core residency were not recorded.}
 \label{fig:qos}
 \end{figure}
-Moving all threads from interactive (P-core bias) to background (E-core bias)
-QoS retains 96\% of FAA's throughput (16.2$\,\to\,$15.6) but 13\% of the
-mutex's (19.8$\,\to\,$2.7) and 6\% of Vyukov's (8.6$\,\to\,$0.5): on
-efficiency cores the FAA queue is ${\sim}6\times$ the mutex and
-${\sim}30\times$ the CAS queue, the reverse of the P-core ranking. The
-mechanism rhymes with F1: slower cores widen CAS windows and lengthen lock
-hold times, amplifying retry storms and convoying, while no-retry claiming
-degrades only with raw core speed. Mixed placements are design-specific:
-Michael--Scott suffers most with producers demoted (2.1 vs 4.3 Mops/s ---
-node \emph{allocation} sits on the producer side), moodycamel the opposite
-(4.5 vs 2.1 --- consumer-side block recycling), a reminder that ``which role
-gets the fast cores'' is an algorithm property, not a scheduling detail.
+In canonical v2, requesting background rather than interactive QoS for all workers
+retains 88\% of FAA throughput (16.7$\,\to\,$14.7 Mops/s), 19\% of the mutex
+(19.1$\,\to\,$3.6), and 6\% of Vyukov (8.1$\,\to\,$0.46). Thus background QoS
+reverses the interactive-policy mutex/FAA order; FAA is about $4\times$ the
+mutex and $32\times$ Vyukov under the background policy. These effects are
+associated with the requested scheduler policies, not observations of the
+effective class. They may involve core-class choice, frequency, priority, and timeslicing,
+none of which the harness observes. Role-specific policies also
+differ by design: MS is lower with producers background than with consumers
+background (2.1 vs 4.3 Mops/s), while moodycamel shows the opposite direction
+(4.5 vs 2.1). This is consistent with side-specific work, but does not identify
+allocation or recycling as the cause.
 
-\subsection{Memory as the failure mode of unboundedness (F4/H3)}
+One of seven all-background rounds was a severe outlier: FAA completed no real
+messages, while Vyukov, mutex, and moodycamel fell to 0.092, 0.174, and
+0.253\,Mops/s; MS remained at 2.65. FAA led the other six paired rounds. The
+median/IQR summary therefore describes the central policy response, not
+round-level reliability under background scheduling.
+
+\subsection{Process memory as an unbounded-implementation failure mode}
 \label{sec:mem}
-The unbounded Michael--Scott queue never reports full; imbalance lands in
-memory instead. In two-second saturated runs its peak RSS reached 376\,MB at
-1:1 and \textbf{742\,MB at 1:7}, versus 1--2\,MB for every bounded design.
-The ratio asymmetry (7\,MB at 7:1 vs 742\,MB at 1:7) localizes the mechanism:
-epoch advancement requires \emph{every} pinned thread to sit at the current
-epoch, and with seven saturated consumers that alignment rarely holds ---
-reclamation starves, so consumer parallelism converts directly into
-reclamation lag. Unbounded designs should be evaluated on a memory axis, not
-only a speed axis.
+The MS queue never reports full. Over the full trial (two-second producer
+interval plus drain and teardown), median process peak RSS is 376\,MB at 1:1
+and \textbf{742\,MB at 1:7}, versus 1--2\,MB for each strictly bounded custom
+design. At 7:1, MS uses only 7\,MB. This consumer-count asymmetry implicates the
+dequeue-side EBR path: each dequeue retires a node, every 64 retirements attempts
+epoch advancement, and the legacy path scans the thread's entire limbo vector.
+It does not, however, partition RSS into live queue nodes, retired nodes, vector
+capacity, or transient orphan-list handoff at thread exit. We therefore treat
+peak RSS as an end-to-end implementation metric rather than a pure queue-footprint
+measurement.
 
-\subsection{Fairness for free (F5)}
+\subsection{Remediating the reclamation pathology}
+\label{sec:ebrfix}
+\begin{figure}[t]\centering
+\maybefig[h3]{fig_ebrfix}{\linewidth}
+\caption{EBR remediation modes (one warmup, seven measured rounds): full-trial
+peak RSS (log) and end-to-end throughput for legacy scanning, prefix
+reclamation, a failed heavier retry bundle, and the bounded mutex reference.}
+\label{fig:ebrfix}
+\end{figure}
+The three modes are runtime-selectable in the same build. Legacy reclamation
+always scans and compacts the full limbo vector, $O(\text{limbo})$, even when
+nothing is eligible. Retire epochs are nondecreasing, so the prefix mode stops
+at the first survivor. Its vector erase still shifts survivors: the general
+cost is expired entries visited plus survivors shifted, not merely the number
+freed. Its decisive code-path difference is the stuck-epoch case, where no
+entry expires and it returns in $O(1)$ instead of scanning all limbo entries.
+
+At 1:7 and 2:6, prefix mode reduces median peak RSS by 76--82\%
+($626\!\to\!153$ and $536\!\to\!97$\,MB) and raises end-to-end throughput by
+76\% and 28\% (1:7: $5.4\!\to\!9.4$\,Mops/s). Code-path analysis plus this A/B
+result is consistent with a feedback loop in which unconditional scans prolong
+operations, delay epoch movement, and enlarge limbo. We did not record limbo
+size, maintenance time, or live-node count, so we do not claim direct causal
+measurement; throughput gains can also include cheaper drain and TLS teardown.
+
+The effect is not uniform. At 4:4, prefix mode cuts RSS 52\% but reduces
+throughput 13\%; at 1:1, both legacy and prefix retain about 530\,MB. The latter
+is consistent with too few advancement attempts rather than scan cost, but is
+left unresolved. Absolute legacy RSS also differs between v2 and h3 (742 vs
+626\,MB at 1:7), so every percentage above is a within-h3 comparison.
+
+The measured \textsf{ms-retry} arm is a heavier \emph{bundle}: prefix scanning,
+maintenance deferred until unpinned, up to 64 advancement probes under
+pressure, and an amortized registry scan every 256 pins. It is worse at 1:7
+(717\,MB and 51\% lower throughput than legacy). Because several mechanisms
+change together, this negative result rejects the bundle but does not apportion
+blame among its components. Hart et al.~\cite{hart2007} showed that reclamation
+scheme choice affects performance; here, implementation details within one EBR
+scheme are themselves material.
+
+\subsection{Finite-window work balance}
 \begin{figure}[t]\centering
 \maybefig[v3]{fig_fairness}{\linewidth}
-\caption{Producer- and consumer-side fairness (CoV of per-thread completed
-operations) at 4P:4C, dedicated vs $4\times$ oversubscribed.}
+\caption{CoV of per-thread completed counts at 4P:4C, capacity 1024. Lower is
+more balanced over the finite trial; this is not a liveness guarantee.}
 \label{fig:fair}
 \end{figure}
-The coefficient of variation of per-thread completed operations measures
-starvation on both sides (Fig.~\ref{fig:fair}). FAA ticketing is
-near-perfectly fair everywhere (producer CoV $\le 0.008$, including $\times4$
-oversubscription) --- FIFO tickets are fairness by construction, and the
-\textsf{casticket} control shows the property partially survives even a CAS
-claim (though its lost CASes translate into visibly higher spread). All other
-designs degrade under stress (4:4 $\times4$ producer CoV: MS 0.14, Vyukov
-0.12, moodycamel 0.13, mutex 0.08), and moodycamel is structurally unfair at
-producer-heavy dedicated shapes (CoV 0.18--0.19 at 6:2 and 7:1), consistent
-with its per-producer sub-queue architecture trading fairness for throughput.
+The coefficient of variation (CoV) of per-thread counts measures finite-window
+work balance, not starvation freedom (Fig.~\ref{fig:fair}). At capacity 1024,
+FAA's median producer CoV rises from 0.0017 at $\times1$ to only 0.0076 at
+$\times4$; CAS/ticket is 0.014 and 0.010. Ticket order is FIFO among issued
+claims, but a frequently scheduled thread can issue more claims, so the low CoV
+is an empirical workload result rather than fairness by construction. At
+$\times4$, median producer CoV for the other arms ranges from 0.073 (mutex) to
+0.150 (MS). Moodycamel's producer-heavy v2 medians reach 0.18--0.19, consistent
+with its per-producer subqueues and weaker global ordering. Sequential thread
+launch can also contribute startup skew; longer-run fairness deserves separate
+study.
 
-\subsection{Dedicated-core latency, and an incompatibility}
-On dedicated cores (post-confounder-fix), median latencies are
-sub-2\,\textmu s for all designs (FAA best at 333\,ns; the mutex worst at
-1.75\,\textmu s with p99 of 44\,\textmu s vs 5--12\,\textmu s for the rest).
-Dedicated-core p99.9 splits by family: the array/ticket designs stay sub-
-millisecond in every run (v3: Vyukov ${<}0.05$, casticket 0.2, FAA
-0.6\,ms), while Michael--Scott and the mutex show run-\emph{variable}
-multi-millisecond tails (0.27/0.39\,ms in one full run, 8.2/6.1\,ms in
-another) --- consistent with reclamation maintenance bursts and lock convoys
-being scheduler-timing-dependent. Preemption, not the dedicated case, is what
-separates the designs decisively. Separately, moodycamel
-exceeded a 120\,s timeout in 7 of 8 rounds at capacity 64 under $\times4$
-oversubscription (wedged in the drain phase); we report this as a
-configuration incompatibility rather than scoring it.
+\subsection{Non-oversubscribed latency, and an incompatibility}
+Using v3 consistently, $\times1$ 4:4 p50 is below 1.8\,$\mu$s for every arm
+(FAA 375\,ns; mutex 1.79\,$\mu$s). At p99, mutex reaches 262\,$\mu$s and MS
+21.2\,$\mu$s; the others range from 1.8 to 12.5\,$\mu$s. Median p99.9 is
+24\,$\mu$s for Vyukov, 45\,$\mu$s for Vyukov-backoff, 0.206\,ms for
+CAS/ticket, 0.583\,ms for FAA, and 0.737\,ms for moodycamel, versus 8.20\,ms
+for MS and 6.10\,ms for the mutex. These medians show substantial run-to-run
+tail variability; they do not establish a stable $\times1$ ordering.
 
-\subsection{Thermal screen}
+Separately, with the constructor capacity argument set to 64 at $\times4$,
+moodycamel completes only the v2 warmup row and no measured round before the
+120\,s timeout, during drain/poison handling. Because 64 is only a preallocation
+estimate for this library, we report a harness/configuration incompatibility,
+not a strict-capacity result or a throughput score.
+
+\subsection{Environment screen}
 \begin{figure}[t]\centering
 \maybefig{fig_calib}{\linewidth}
-\caption{Pinned calibration-probe trace across the matrix (thermal screen).}
+\caption{Trace of the calibration probe requested at interactive QoS across
+v2. It screens environment drift but does not observe temperature, frequency,
+or core residency.}
 \label{fig:calib}
 \end{figure}
+The trace has no monotone matrix-long slowdown, and queue-wise calibration
+medians differ by about 1.6\%. Because queue order is fixed, the screen cannot
+exclude a small repeatable position effect; this is a reason to randomize order
+in future datasets.
 
 \section{Threats to Validity}
 \label{sec:threats}
-Single machine and OS: we characterize one client SoC and claim no general
-ranking. QoS is a scheduler bias, not pinning; we report policies, and our own
-confounder analysis (Sec.~\ref{sec:method}) quantifies how easily placement
-contaminates instruments. Implementations are faithful but not
-micro-optimized to each design's best-known form; the industrial reference
-arm bounds that gap. Apple's memory subsystem is undocumented, so mechanism
-explanations are stated as hypotheses consistent with the data
-(``consistent with,'' never ``because''). The FAA design's throughput gain
-under oversubscription, while replicated across three full runs and
-capacity-controlled, deserves confirmation on other asymmetric parts
-(e.g., Intel hybrid, other Apple generations) --- our artifact makes this a
-one-command experiment for anyone with such hardware.
+\textbf{External and construct validity.} This is one 8\,GB M2 Air, OS, and
+compiler; it establishes no client-wide or cross-architecture ranking. QoS
+class is not core placement, and oversubscription is only a preemption proxy.
+We lack scheduler traces, residency, frequency, power, temperature, and cache-
+coherence counters. Accordingly, explanations based on scheduling or shared-
+cursor traffic are hypotheses consistent with controls and diagnostics.
+
+\textbf{Measurement validity.} Queue order is fixed, workers have no start
+barrier, and the throughput timer starts before producers are launched
+sequentially. Two-second medians reduce but do not eliminate order and startup
+skew. The throughput denominator includes drain and EBR teardown; process peak
+RSS includes live data, retired objects, allocator/vector capacity, and possible
+transient orphan handoff. Historical v3 fixed latency buffers truncate up to
+2.17\% of samples in the disclosed non-ticket trials, so the pipeline excludes
+those rows; the current exact-accounting path corrects this for new runs but
+does not retroactively repair them. Seven measured rounds support descriptive
+medians and IQRs, not small-effect or multiple-comparison inference; mechanism
+counters have only two measured rounds and can perturb the retry paths they
+count.
+
+\textbf{Implementation validity.} The custom queues are study implementations,
+not each design's best-known optimized version. The MS findings include this
+specific allocator and EBR, not the Michael--Scott algorithm or EBR generally.
+The two controls are single-change only relative to their own parents; there is
+no single-change bridge between the CAS ring and ticket/turn protocol.
+Moodycamel differs in global ordering and capacity semantics, so it is context,
+not a matched control. Stress invariants and ThreadSanitizer catch many safety
+failures but do not prove linearizability or progress. Replication on other
+systems, randomized trial order, synchronized starts, fresh measurements with
+the corrected latency path, and direct scheduler/performance counters remain
+necessary.
 
 \section{Conclusion}
-On an asymmetric, unpinnable, passively cooled client SoC, the textbook MPMC
-ranking failed three ways: the mutex won the dedicated-core middle; the
-design with the \emph{weakest} completion guarantee (FAA ticketing) was the
-most robust to both preemption and efficiency cores, while the lock-free CAS
-design was the most fragile; and the unbounded lock-free queue's binding
-constraint was memory, not speed. The controlled decomposition sharpens the
-lesson: robustness lives in the ticket/turn \emph{slot discipline} (private-
-cell waiting, no shared-cursor retry), the FAA primitive multiplies throughput
-within it, and neither spin policy nor progress-guarantee class predicts the
-outcome --- all conditional on capacity absorbing scheduling gaps. Practical
-guidance: on client silicon choose ticket/turn designs (ideally FAA-claimed,
-adequately sized) for preemption- and placement-robustness, a mutex for
-simplicity at moderate mixed ratios, and treat 1:1 microbenchmarks as
-advertising. More broadly: progress-guarantee taxonomy is not a performance
-model --- measurement under the deployment regime, with controls, is.
+On this M2 system, no design wins every tested regime. The 1:1 array-queue lead
+does not survive all mixed ratios; the mutex leads at 4:4 and 2:6; the
+capacity-1024 ticket protocol improves under oversubscription while the CAS
+reservation ring collapses; and changing QoS policy reverses their ranking
+without revealing which cores ran them. Parent controls rule out one yielding
+policy as a remedy and show that FAA is not required for the ticket profile,
+but do not by themselves prove the ticket/turn protocol is causal. Capacity 64
+restores the predicted reservation stall.
+
+For this MS+EBR implementation, process memory is as important as speed. Prefix
+reclamation materially improves consumer-heavy shapes, has a throughput cost at
+4:4, and leaves 1:1 unresolved; the heavier remediation bundle fails. The
+practical lesson is conditional: measure completed-message makespan, tails,
+memory, work balance, capacity, and scheduler policy in the intended deployment
+rather than extrapolating from 1:1 throughput or from labels such as
+``lock-free.''
 
 \section*{Artifact}
-Code, datasets (raw CSVs), and figure pipeline:
-\url{https://github.com/Dd1235/SPSC_Queue}. \texttt{scripts/reproduce.sh}
-regenerates the dataset and every figure; \texttt{paper/notes/claims.md} maps
-each claim to its data.
+Code, committed raw CSVs, claim checks, experiment profiles, and the figure
+pipeline are at \url{https://github.com/Dd1235/SPSC_Queue}. Historical v2/v3
+and h3 data were generated at different revisions; the artifact records those
+datasets and git history rather than claiming byte-identical regeneration from
+current HEAD. \texttt{paper/notes/claims.md} maps claims to data, and
+\texttt{scripts/verify\_claims.py} recomputes the quantitative checks.
 
+\IEEEtriggeratref{17}
 \bibliographystyle{IEEEtran}
 \bibliography{refs}
 
