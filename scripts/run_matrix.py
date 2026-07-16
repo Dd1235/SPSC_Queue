@@ -116,15 +116,26 @@ def shapes(smoke: bool, focus: str = ""):
 
 
 def is_documented_skip(shape, queue):
-    """The exact moodycamel arm documented as incompatible with this harness."""
+    """Moodycamel arms documented as incompatible with this harness.
+
+    cap64/x4 throughput wedges during drain; latency at saturated offered
+    loads (>= 8M msg/s) probabilistically strands messages because pills can
+    overtake older data across sub-queues, tripping the accounting invariant.
+    See dataset_utils._known_unsupported for the analysis-side twin.
+    """
+    if queue != "moody" or shape["qos"] != "none":
+        return False
+    if (shape["mode"] == "throughput" and shape["producers"] == 4
+            and shape["consumers"] == 4 and shape["oversubscribe"] == 4
+            and shape.get("capacity", 1024) == 64):
+        return True
     return (
-        queue == "moody"
-        and shape["mode"] == "throughput"
+        shape["mode"] == "latency"
         and shape["producers"] == 4
         and shape["consumers"] == 4
-        and shape["oversubscribe"] == 4
-        and shape.get("capacity", 1024) == 64
-        and shape["qos"] == "none"
+        and shape["oversubscribe"] == 1
+        and shape.get("capacity", 1024) == 1024
+        and shape.get("rate", 0) >= 8_000_000
     )
 
 

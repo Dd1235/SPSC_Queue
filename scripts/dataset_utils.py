@@ -71,15 +71,23 @@ def _configuration_set(df: pd.DataFrame) -> set[tuple[object, ...]]:
 
 
 def _known_unsupported(df: pd.DataFrame) -> pd.Series:
-    """Historical rows from the explicitly excluded moody/cap64/x4 arm.
+    """Rows from configurations documented as incompatible with the harness.
 
-    That configuration frequently wedges during drain.  Some old rounds happen
-    to contain a successful row while others time out, so retaining the
-    occasional successes would make round completeness and sample counts depend
-    on luck.  New matrices skip this arm before execution.
+    1. moody/cap64/x4 (throughput): frequently wedges during drain.
+    2. moody at saturated offered loads (latency mode, rate >= 8M msg/s at
+       4:4 x1): the poison-pill drain protocol assumes a pill enqueued after
+       all data cannot starve older data forever, but moodycamel's documented
+       per-producer sub-queue ordering lets a consumer take its pill while
+       another sub-queue still holds messages.  Beyond the queue's saturation
+       point this strands a handful of messages in some rounds; the benchmark's
+       accounting invariant then aborts (exit 3).  Retaining the rounds that
+       happened to win the race would make sample counts depend on luck, so
+       the configuration is excluded symmetrically.
+
+    New matrices skip these arms before execution where possible.
     """
 
-    return (
+    wedge = (
         df["queue"].eq("moody")
         & df["mode"].eq("throughput")
         & df["producers"].eq(4)
@@ -88,6 +96,17 @@ def _known_unsupported(df: pd.DataFrame) -> pd.Series:
         & df["capacity"].eq(64)
         & df["qos"].eq("none")
     )
+    strand = (
+        df["queue"].eq("moody")
+        & df["mode"].eq("latency")
+        & df["producers"].eq(4)
+        & df["consumers"].eq(4)
+        & df["oversubscribe"].eq(1)
+        & df["capacity"].eq(1024)
+        & df["qos"].eq("none")
+        & df["rate"].ge(8_000_000)
+    )
+    return wedge | strand
 
 
 def load_dataset(
