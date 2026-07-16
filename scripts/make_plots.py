@@ -345,6 +345,67 @@ def fig_ebrfix(df, outdir, tag):
     plt.close(fig)
 
 
+def fig_ebrmech(df, outdir, tag):
+    """F8 mechanism (stats twin): maintenance cost, advance success, limbo peak.
+
+    One panel per counter, ms modes across ratios. Together the panels observe
+    each link of the hypothesized cost feedback loop separately, so competing
+    failure theories make different predictions (see paper Sec. F8).
+    """
+    base = df[(df["mode"] == "throughput") & (df.oversubscribe == 1) &
+              (df.qos == "none") & (df.capacity == 1024)].copy()
+    base["ratio"] = base.producers.astype(str) + ":" + base.consumers.astype(str)
+    ratios = [r for r in ["1:1", "4:4", "2:6", "1:7"] if r in set(base.ratio)]
+    labels = {"ms": "legacy", "ms-fix": "prefix fix", "ms-retry": "retry variant"}
+    colors = {"ms": "#2a78d6", "ms-fix": "#008300", "ms-retry": "#e34948"}
+    hatches = {"ms": None, "ms-fix": None, "ms-retry": "//"}
+    panels = (
+        ("ebr_maint_ns_per_pass", "maintenance (µs/pass, log)", True, 1e-3),
+        ("ebr_adv_success_rate", "advance success (%)", False, 100.0),
+        ("ebr_limbo_peak", "peak limbo (entries, log)", True, 1.0),
+    )
+    fig, axes = plt.subplots(1, 3, figsize=(6.8, 2.4))
+    for ax, (col, ylabel, logy, scale) in zip(axes, panels):
+        d = base[base.ratio.isin(ratios) & (base.trial > 0)]
+        stats = d.groupby(["ratio", "queue"], observed=True)[col].agg(
+            median="median",
+            q1=lambda values: values.quantile(0.25),
+            q3=lambda values: values.quantile(0.75),
+        ).reset_index()
+        qs = [q for q in ["ms", "ms-fix", "ms-retry"] if q in set(stats.queue)]
+        width = min(0.8 / max(len(qs), 1), 0.25)
+        for i, q in enumerate(qs):
+            rows = stats[stats.queue == q].set_index("ratio")
+            xs, ys, lo, hi = [], [], [], []
+            for j, rt in enumerate(ratios):
+                if rt in rows.index:
+                    row = rows.loc[rt]
+                    xs.append(j + (i - (len(qs) - 1) / 2) * width)
+                    value = float(row["median"]) * scale
+                    floor = 0.5 if col == "ebr_limbo_peak" else 1e-3
+                    ys.append(max(value, floor) if logy else value)
+                    lo.append(value - float(row["q1"]) * scale)
+                    hi.append(float(row["q3"]) * scale - value)
+            ax.bar(xs, ys, width * 0.9, color=colors[q], label=labels[q],
+                   edgecolor="white", linewidth=0.6, hatch=hatches.get(q))
+            ax.errorbar(xs, ys, yerr=[lo, hi], fmt="none", ecolor="#444",
+                        elinewidth=0.7, capsize=1.5)
+        ax.set_xticks(range(len(ratios)))
+        ax.set_xticklabels(ratios, fontsize=6)
+        ax.set_ylabel(ylabel, fontsize=7)
+        ax.set_xlabel("producers : consumers", fontsize=7)
+        ax.tick_params(labelsize=6)
+        if logy:
+            ax.set_yscale("log")
+    handles, legend_labels = axes[0].get_legend_handles_labels()
+    fig.legend(handles, legend_labels, fontsize=6, frameon=False, ncol=3,
+               loc="upper center", bbox_to_anchor=(0.5, 1.0), columnspacing=1.0)
+    fig.tight_layout(rect=(0, 0, 1, 0.9))
+    for ext in ("pdf", "png"):
+        fig.savefig(outdir / f"fig_ebrmech_{tag}.{ext}")
+    plt.close(fig)
+
+
 def fig_loadcurve(df, outdir, tag):
     """Optional offered-rate profile: schedule-to-dequeue p99 latency."""
     base = df[(df["mode"] == "latency") & (df.trial > 0) &
@@ -515,6 +576,8 @@ def main():
          generic and "cons_cov" in df.columns and
          {1, 4}.issubset(set(oversub_rows.oversubscribe)))
     emit("fig_ebrfix", fig_ebrfix, has_ebr_focus)
+    emit("fig_ebrmech", fig_ebrmech,
+         "ebr_maint_ns_per_pass" in df.columns and df.ebr_maint_ns_per_pass.max() > 0)
     emit("fig_loadcurve", fig_loadcurve, has_load_focus)
     emit("fig_mechanism", fig_mechanism,
          generic and "retries_per_op" in df.columns and df.retries_per_op.max() > 0)
