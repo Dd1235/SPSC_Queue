@@ -36,6 +36,8 @@ COLOR = {
     "spsc": "#008300",       # green
     "moody": "#4a3aa7",      # violet
     "mutex": "#e34948",      # red
+    "rigtorp": "#eda100",    # yellow (industrial member of the ticket family)
+    "xenium": "#2a78d6",     # blue (industrial MS variant: hazard pointers)
 }
 LABEL = {
     "ms": "Michael–Scott (EBR)",
@@ -46,10 +48,13 @@ LABEL = {
     "mutex": "mutex+deque",
     "moody": "moodycamel CQ",
     "spsc": "SPSC (1:1 only)",
+    "rigtorp": "rigtorp MPMC",
+    "xenium": "xenium MS+HP",
 }
-HATCH = {"vyukov-b": "//", "casticket": "//"}   # bar variant marker
-DASH = {"vyukov-b": (4, 2), "casticket": (4, 2)}  # line variant marker
-ORDER = ["ms", "vyukov", "vyukov-b", "faa", "casticket", "moody", "mutex", "spsc"]
+HATCH = {"vyukov-b": "//", "casticket": "//", "rigtorp": "..", "xenium": ".."}
+DASH = {"vyukov-b": (4, 2), "casticket": (4, 2), "rigtorp": (1, 1), "xenium": (1, 1)}
+ORDER = ["ms", "xenium", "vyukov", "vyukov-b", "faa", "casticket", "rigtorp",
+         "moody", "mutex", "spsc"]
 
 plt.rcParams.update({
     "font.size": 8.5,
@@ -406,7 +411,76 @@ def fig_ebrmech(df, outdir, tag):
     plt.close(fig)
 
 
+def fig_industrial(df, outdir, tag):
+    """Industrial cross-checks: rigtorp vs faa under oversubscription (left);
+    reclamation-scheme memory at consumer-heavy ratios, xenium HP vs our EBR
+    (right). Each panel pairs one of our arms with its independent industrial
+    counterpart, same rounds, same thermal regime."""
+    fig, axes = plt.subplots(1, 2, figsize=(6.8, 2.6))
+
+    over = agg(df[(df["mode"] == "throughput") & (df.producers == 4) &
+                  (df.consumers == 4) & (df.qos == "none") &
+                  (df.capacity == 1024)], "throughput_mops")
+    ax = axes[0]
+    for q in [q for q in ("faa", "rigtorp", "vyukov", "mutex")
+              if q in set(over.queue)]:
+        rows = over[over.queue == q].sort_values("oversubscribe")
+        ax.errorbar(rows.oversubscribe, rows["median"],
+                    yerr=[rows["median"] - rows.q1, rows.q3 - rows["median"]],
+                    color=COLOR[q], label=LABEL[q], marker="o", markersize=3.5,
+                    linewidth=1.5, capsize=1.5,
+                    dashes=DASH.get(q, (None, None)) if q in DASH else (None, None),
+                    linestyle="--" if q in DASH else "-")
+    ax.set_xscale("log", base=2)
+    ax.set_xticks([1, 2, 4])
+    ax.set_xticklabels(["x1", "x2", "x4"])
+    ax.set_yscale("log")
+    ax.set_ylabel("throughput (Mops/s, log)")
+    ax.set_xlabel("oversubscription (4P:4C, cap 1024)")
+    ax.legend(fontsize=6, frameon=False)
+
+    mem = df[(df["mode"] == "throughput") & (df.oversubscribe == 1) &
+             (df.qos == "none") & (df.capacity == 1024) & (df.trial > 0)].copy()
+    mem["ratio"] = mem.producers.astype(str) + ":" + mem.consumers.astype(str)
+    ratios = [r for r in ["1:1", "4:4", "2:6", "1:7"] if r in set(mem.ratio)]
+    stats = mem.groupby(["ratio", "queue"], observed=True)["peak_rss_mb"].agg(
+        median="median",
+        q1=lambda values: values.quantile(0.25),
+        q3=lambda values: values.quantile(0.75),
+    ).reset_index()
+    ax = axes[1]
+    qs = [q for q in ("ms", "xenium", "mutex") if q in set(stats.queue)]
+    width = min(0.8 / max(len(qs), 1), 0.25)
+    for i, q in enumerate(qs):
+        rows = stats[stats.queue == q].set_index("ratio")
+        xs, ys, lo, hi = [], [], [], []
+        for j, rt in enumerate(ratios):
+            if rt in rows.index:
+                row = rows.loc[rt]
+                xs.append(j + (i - (len(qs) - 1) / 2) * width)
+                value = float(row["median"])
+                ys.append(max(value, 0.5))
+                lo.append(value - float(row["q1"]))
+                hi.append(float(row["q3"]) - value)
+        ax.bar(xs, ys, width * 0.9, color=COLOR[q], label=LABEL[q],
+               edgecolor="white", linewidth=0.6, hatch=HATCH.get(q))
+        ax.errorbar(xs, ys, yerr=[lo, hi], fmt="none", ecolor="#444",
+                    elinewidth=0.7, capsize=1.5)
+    ax.set_xticks(range(len(ratios)))
+    ax.set_xticklabels(ratios)
+    ax.set_yscale("log")
+    ax.set_ylabel("peak RSS (MB, log)")
+    ax.set_xlabel("producers : consumers")
+    ax.legend(fontsize=6, frameon=False)
+
+    fig.tight_layout()
+    for ext in ("pdf", "png"):
+        fig.savefig(outdir / f"fig_industrial_{tag}.{ext}")
+    plt.close(fig)
+
+
 def fig_loadcurve(df, outdir, tag):
+
     """Optional offered-rate profile: schedule-to-dequeue p99 latency."""
     base = df[(df["mode"] == "latency") & (df.trial > 0) &
               (df.producers == 4) & (df.consumers == 4) &
@@ -570,6 +644,8 @@ def main():
     emit("fig_ebrmech", fig_ebrmech,
          "ebr_maint_ns_per_pass" in df.columns and df.ebr_maint_ns_per_pass.max() > 0)
     emit("fig_loadcurve", fig_loadcurve, has_load_focus)
+    emit("fig_industrial", fig_industrial,
+         bool(set(df.queue) & {"rigtorp", "xenium"}))
     emit("fig_mechanism", fig_mechanism,
          generic and "retries_per_op" in df.columns and df.retries_per_op.max() > 0)
     write_summary(df, data_dir, args.tag, selections)

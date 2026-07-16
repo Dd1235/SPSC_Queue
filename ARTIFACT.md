@@ -95,6 +95,21 @@ python3 scripts/run_matrix.py --focus h1 \
 # Offered-load curve (tailored six-arm default).
 python3 scripts/run_matrix.py --focus load --trials 6 --seconds 2 \
   --out paper/data/matrix_load_repro.csv
+
+# Industrial cross-checks (rigtorp MPMCQueue; xenium Michael-Scott with
+# hazard pointers). Requires SPSC_BENCH_THIRDPARTY=ON.
+python3 scripts/run_matrix.py --focus ind --trials 9 --seconds 2 \
+  --out paper/data/matrix_ind_repro.csv
+
+# Observed cluster residency + energy per op (macOS; powermetrics needs root:
+# run `sudo -v` first, or the script itself with sudo).
+python3 scripts/run_power.py --out paper/data/matrix_power_repro.csv
+
+# Sustained-load thermal series on the fanless machine (~30 min).
+python3 scripts/run_thermal.py --out paper/data/matrix_thermal_repro.csv
+
+# 95% bootstrap percentile intervals quoted next to headline claims.
+python3 scripts/bootstrap_ci.py
 ```
 
 Interrupted runs may be continued with `--resume`. Resume discards an
