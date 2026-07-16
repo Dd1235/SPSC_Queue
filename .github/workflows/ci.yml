@@ -56,3 +56,24 @@ jobs:
         run: cmake --build build -j
       - name: Test
         run: ctest --test-dir build --output-on-failure
+
+  artifact-integrity:
+    name: paper artifact / claims and figures
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: requirements-paper.txt
+      - name: Install pinned analysis dependencies
+        run: python -m pip install -r requirements-paper.txt
+      - name: Verify committed quantitative claims
+        run: python scripts/verify_claims.py
+      - name: Smoke-regenerate canonical figures
+        run: |
+          python scripts/make_plots.py --csv paper/data/matrix_v3.csv --tag ci \
+            --assets "${RUNNER_TEMP}/figures" --summary-dir "${RUNNER_TEMP}/data"
+          test -s "${RUNNER_TEMP}/figures/fig_oversubscription_ci.pdf"
+          test -s "${RUNNER_TEMP}/data/summary_ci.md"

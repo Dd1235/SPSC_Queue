@@ -16,7 +16,7 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - { os: macos-14, label: apple-silicon-m1 }   # Apple silicon VM (3-4 cores)
+          - { os: macos-15, label: apple-silicon-arm64 } # Supported Apple silicon VM
           - { os: ubuntu-latest, label: x86-64 }        # x86 VM (4 vCPU)
     steps:
       - uses: actions/checkout@v4
@@ -36,7 +36,7 @@ jobs:
                 for q in vyukov vyukov-b faa casticket mutex; do
                   ./build/benchmarks/bench_mpmc --queue $q --producers 2 --consumers 2 \
                     --oversubscribe $over --capacity $cap --seconds 1 --trial $trial \
-                    --csv ci_${{ matrix.label }}.csv || echo "FAIL $q cap=$cap x$over"
+                    --csv ci_${{ matrix.label }}.csv
                 done
               done
             done
