@@ -4,6 +4,8 @@
 #include "test_util.hpp"
 
 #include <cstdint>
+#include <limits>
+#include <stdexcept>
 #include <string>
 
 using spsc::SPSCQueue;
@@ -26,6 +28,26 @@ static void test_basic_fifo_and_edges() {
     CHECK(q.try_pop(out) && out == 3);
     CHECK(!q.try_pop(out));  // empty
     CHECK(q.size_approx() == 0);
+}
+
+static void test_capacity_validation() {
+    bool rejectedZero = false;
+    try {
+        SPSCQueue<int> q(0);
+        (void)q;
+    } catch (const std::invalid_argument&) {
+        rejectedZero = true;
+    }
+    CHECK(rejectedZero);
+
+    bool rejectedOverflow = false;
+    try {
+        SPSCQueue<int> q(std::numeric_limits<std::size_t>::max());
+        (void)q;
+    } catch (const std::length_error&) {
+        rejectedOverflow = true;
+    }
+    CHECK(rejectedOverflow);
 }
 
 static void test_front_pop_peek() {
@@ -155,6 +177,7 @@ template <bool Padded, bool Cached> static void smoke_config() {
 
 int main() {
     test_basic_fifo_and_edges();
+    test_capacity_validation();
     test_front_pop_peek();
     test_wraparound();
     test_emplace_inplace();

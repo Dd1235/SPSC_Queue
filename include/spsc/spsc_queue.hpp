@@ -11,13 +11,16 @@
 // decisions -- cache-line padding and the cached-index optimization -- against
 // a single source of truth rather than a forked copy of the code.
 //
-// See learn/ for the full derivation; the short version lives next to the code.
+// See the repository README and paper for the full derivation; the short
+// version lives next to the code.
 #pragma once
 
 #include <atomic>
 #include <cassert>
 #include <cstddef>
+#include <limits>
 #include <new>
+#include <stdexcept>
 #include <type_traits>
 #include <utility>
 
@@ -37,16 +40,25 @@ namespace spsc {
 inline constexpr std::size_t kCacheLineSize = SPSC_CACHE_LINE_SIZE;
 
 template <class T, bool Padded = true, bool Cached = true> class SPSCQueue {
+    static std::size_t checked_ring_size(std::size_t capacity) {
+        if (capacity == 0) throw std::invalid_argument("SPSCQueue capacity must be positive");
+
+        constexpr std::size_t max = std::numeric_limits<std::size_t>::max();
+        if (capacity == max || capacity + 1 > max / sizeof(T))
+            throw std::length_error("SPSCQueue capacity is too large");
+        return capacity + 1;
+    }
+
 public:
     // `capacity` is the number of elements the queue can hold at once. We
     // allocate one extra slot internally so that "full" and "empty" are
     // distinguishable without a separate contended counter (see push/pop).
+    // Zero is invalid; sizes that would overflow the backing allocation are
+    // rejected with std::length_error.
     explicit SPSCQueue(std::size_t capacity)
-        : capacity_(capacity), ring_(capacity + 1),
+        : capacity_(capacity), ring_(checked_ring_size(capacity)),
           slots_(static_cast<T*>(
-              ::operator new(ring_ * sizeof(T), std::align_val_t{alignof(T)}))) {
-        assert(capacity >= 1 && "capacity must be at least 1");
-    }
+              ::operator new(ring_ * sizeof(T), std::align_val_t{alignof(T)}))) {}
 
     ~SPSCQueue() {
         // Destruction is single-threaded: destroy whatever is still live,
