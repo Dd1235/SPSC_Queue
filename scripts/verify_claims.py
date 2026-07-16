@@ -285,6 +285,70 @@ def run_checks():
     ck('F8 retry 1:7 throughput decrease=51%', 51,
        100 * (1 - h3_tp_17['ms-retry'] / h3_tp_17['ms']), replication_tol=0.20)
 
+    # -- F8-M: instrumented reclamation mechanism (matrix_h3s, stats build) --
+    def h3s_med(value, producers, consumers):
+        return med('matrix_h3s', value=value, mode='throughput',
+                   producers=producers, consumers=consumers,
+                   oversubscribe=1, qos='none', capacity=1024)
+
+    maint_17 = h3s_med('ebr_maint_ns_per_pass', 1, 7)
+    adv_17 = h3s_med('ebr_adv_success_rate', 1, 7)
+    limbo_17 = h3s_med('ebr_limbo_peak', 1, 7)
+    rss_17s = h3s_med('peak_rss_mb', 1, 7)
+    tp_17s = h3s_med('throughput_mops', 1, 7)
+    ck('F8-M 1:7 legacy maint=79.6us/pass', 79.6, maint_17['ms'] / 1000)
+    ck('F8-M 1:7 prefix maint=21.3us/pass', 21.3, maint_17['ms-fix'] / 1000)
+    ck('F8-M 1:7 retry maint=168us/pass', 168, maint_17['ms-retry'] / 1000)
+    ck('F8-M 1:7 adv success <0.3% in both non-retry modes', 1,
+       float(adv_17['ms'] < 0.003 and adv_17['ms-fix'] < 0.003),
+       committed_tol=0, replication_tol=0)
+    ck('F8-M 1:7 retry adv success=68.6%', 68.6, 100 * adv_17['ms-retry'],
+       replication_tol=0.30)
+    ck('F8-M 1:7 prefix peak limbo LARGER than legacy', 1,
+       float(limbo_17['ms-fix'] > limbo_17['ms']),
+       committed_tol=0, replication_tol=0)
+    ck('F8-M 1:7 replicated RSS 578->227MB', 578 / 227,
+       rss_17s['ms'] / rss_17s['ms-fix'], replication_tol=0.30)
+    ck('F8-M 1:7 replicated throughput 5.4->10.4', 10.4, tp_17s['ms-fix'],
+       replication_tol=0.20)
+    maint_11 = h3s_med('ebr_maint_ns_per_pass', 1, 1)
+    adv_11 = h3s_med('ebr_adv_success_rate', 1, 1)
+    limbo_11 = h3s_med('ebr_limbo_peak', 1, 1)
+    rss_11s = h3s_med('peak_rss_mb', 1, 1)
+    ck('F8-M 1:1 reclamation healthy in both modes '
+       '(adv>=99.8%, maint<=5us, limbo<=3.5k)', 1,
+       float(all(adv_11[q] >= 0.998 and maint_11[q] <= 5000 and
+                 limbo_11[q] <= 3500 for q in ('ms', 'ms-fix'))),
+       committed_tol=0, replication_tol=0)
+    ck('F8-M 1:1 RSS ~550-600MB despite healthy reclamation', 1,
+       float(all(500 <= rss_11s[q] <= 660 for q in ('ms', 'ms-fix'))),
+       committed_tol=0, replication_tol=0)
+
+    # -- F9: saturation knees (matrix_load + matrix_load2 offered-rate sweep) --
+    def p50_us(csv, rate):
+        return med(csv, value='p50_ns', mode='latency', producers=4,
+                   consumers=4, oversubscribe=1, qos='none', capacity=1024,
+                   rate=rate) / 1000
+
+    ck('F9 faa p50 at 8M offered=0.4us', 0.4, p50_us('matrix_load2', 8e6)['faa'])
+    ck('F9 casticket p50 at 8M offered=24.7us', 24.7,
+       p50_us('matrix_load2', 8e6)['casticket'], replication_tol=0.50)
+    ck('F9 mutex pre-knee gradient 0.8->52.5us (0.25M->4M)', 52.5 / 0.83,
+       p50_us('matrix_load', 4e6)['mutex'] / p50_us('matrix_load', 250e3)['mutex'],
+       committed_tol=0.05, replication_tol=0.50)
+    ck('F9 knees ordered: ms+mutex<=6M, vyukov<=8M, faa>8M', 1,
+       float(p50_us('matrix_load', 4e6)['ms'] < 1
+             and p50_us('matrix_load2', 6e6)['ms'] > 10_000
+             and p50_us('matrix_load2', 6e6)['mutex'] > 10_000
+             and p50_us('matrix_load2', 6e6)['vyukov'] < 1_000
+             and p50_us('matrix_load2', 8e6)['vyukov'] > 10_000
+             and p50_us('matrix_load2', 8e6)['faa'] < 1
+             and p50_us('matrix_load2', 12e6)['faa'] > 10_000),
+       committed_tol=0, replication_tol=0)
+    ck('F9 moody strand rows excluded=22', 22,
+       selections['matrix_load2'].excluded_known_rows,
+       committed_tol=0, replication_tol=0)
+
     calib_rows = dataset('matrix_v2')
     calib = calib_rows[calib_rows.trial > 0].groupby('queue').calib_ns.median()
     ck('v2 queue-wise calibration spread=1.6%', 1.6,
