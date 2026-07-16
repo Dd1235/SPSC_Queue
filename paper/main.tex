@@ -7,7 +7,9 @@
 % prose in their own voice, and check the venue's AI-disclosure policy.
 % Every number below is traceable: matrix_v2.csv (full matrix, 7 kept rounds),
 % matrix_v3.csv (controls, 7 kept rounds), matrix_h3.csv (reclamation,
-% 7 kept rounds), matrix_v3s.csv (1.5 s instrumented profile, 2 kept rounds),
+% 7 kept rounds), matrix_h3s.csv (reclamation mechanism, stats build, 7 kept
+% rounds), matrix_v3s.csv (1.5 s instrumented profile, 2 kept rounds),
+% matrix_load.csv + matrix_load2.csv (offered-load sweeps, 5 + 6 kept rounds),
 % and matrix_v1.csv (first replication);
 % aggregation = scripts/make_plots.py; claim->data map = notes/claims.md.
 \documentclass[conference]{IEEEtran}
@@ -19,7 +21,8 @@
 
 \newcommand{\figtag}{v2} % default dataset tag; per-figure tags override below
 % Datasets: v2 = full-matrix headline; v3 = control matrix; h3 = reclamation
-% modes; v3s = short diagnostic stats-build profile.
+% modes; h3s = reclamation mechanism (stats build); v3s = short diagnostic
+% stats-build profile; loadfull = load + load2 offered-rate sweeps combined.
 
 \newcommand{\maybefig}[3][\figtag]{%
   \IfFileExists{assets/#2_#1.pdf}%
@@ -94,9 +97,12 @@ Contributions:
         setups on macOS.
   \item Empirical boundaries rather than a universal winner: a
         capacity-dependent ticket/CAS contrast under oversubscription; ranking
-        changes under QoS policy; mutex wins at two mixed-ratio shapes; and an
-        implementation-specific reclamation pathology analyzed with a
-        successful prefix change and a failed heavier remediation.
+        changes under QoS policy; mutex wins at two mixed-ratio shapes;
+        per-design saturation knees under offered load
+        (Sec.~\ref{sec:knees}); and an implementation-specific reclamation
+        pathology analyzed with a successful prefix change, a failed heavier
+        remediation, and an instrumented mechanism replication that separates
+        maintenance cost from epoch advancement (Sec.~\ref{sec:ebrfix}).
 \end{itemize}
 
 \section{Background and Related Work}
@@ -447,26 +453,53 @@ entry expires and it returns in $O(1)$ instead of scanning all limbo entries.
 
 At 1:7 and 2:6, prefix mode reduces median peak RSS by 76--82\%
 ($626\!\to\!153$ and $536\!\to\!97$\,MB) and raises end-to-end throughput by
-76\% and 28\% (1:7: $5.4\!\to\!9.4$\,Mops/s). Code-path analysis plus this A/B
-result is consistent with a feedback loop in which unconditional scans prolong
-operations, delay epoch movement, and enlarge limbo. We did not record limbo
-size, maintenance time, or live-node count, so we do not claim direct causal
-measurement; throughput gains can also include cheaper drain and TLS teardown.
+76\% and 28\% (1:7: $5.4\!\to\!9.4$\,Mops/s). At 4:4, prefix mode cuts RSS
+52\% but reduces throughput 13\%. Absolute legacy RSS differs between v2 and
+h3 (742 vs 626\,MB at 1:7), so every percentage above is a within-h3
+comparison.
 
-The effect is not uniform. At 4:4, prefix mode cuts RSS 52\% but reduces
-throughput 13\%; at 1:1, both legacy and prefix retain about 530\,MB. The latter
-is consistent with too few advancement attempts rather than scan cost, but is
-left unresolved. Absolute legacy RSS also differs between v2 and h3 (742 vs
-626\,MB at 1:7), so every percentage above is a within-h3 comparison.
+\begin{figure}[t]\centering
+\maybefig[h3s]{fig_ebrmech}{\linewidth}
+\caption{Instrumented reclamation mechanism (stats build, h3s): median
+maintenance-pass duration, epoch-advance success rate, and peak per-thread
+limbo size, per mode and ratio.}
+\label{fig:ebrmech}
+\end{figure}
+\textbf{Measuring the mechanism.} An instrumented replication (matrix h3s,
+same shapes, stats build) records each link of the hypothesized loop
+separately: maintenance-pass duration (the cost link), epoch-advance success
+rate (the stuck-epoch link), and peak per-thread limbo size (the backlog
+link); Fig.~\ref{fig:ebrmech}. The RSS and throughput effects replicate under
+instrumentation (1:7 legacy${\to}$prefix: $578\!\to\!227$\,MB,
+$5.4\!\to\!10.4$\,Mops/s). Three observations discipline the explanation.
+First, at 1:7 the prefix mode cuts median maintenance cost from 79.6 to
+21.3\,\textmu s per pass while the advance success rate stays below 0.3\% in
+\emph{both} modes: the fix works without unsticking the epoch, by making
+stuck-epoch passes cheap. Its peak limbo is accordingly \emph{larger}
+(929k vs.\ 129k entries) --- the backlog spikes, then clears in bulk --- while
+total memory is 2.6$\times$ lower. Second, the retry bundle achieves exactly
+what it was designed for --- its advance success rate reaches 69\% at 1:7 and
+its limbo peak is the smallest of the three --- and still posts the worst
+memory (645\,MB) and throughput (2.6\,Mops/s), with 168\,\textmu s passes.
+Epoch advancement is therefore neither necessary (prefix wins with the epoch
+still stuck) nor sufficient (retry unsticks it and loses); the binding
+quantity is maintenance cost in the consumers' pop path. Third, at 1:1 both
+legacy and prefix show a healthy reclamation system --- ${\ge}99.8\%$ advance
+success, ${\sim}4.6$\,\textmu s passes, peak limbo ${\le}3.5$k entries ---
+yet both retain ${\sim}550$--$600$\,MB. The counters exonerate reclamation
+lag at 1:1; the remaining candidate is live-queue growth (an unthrottled
+producer outrunning a consumer that pays retire-and-maintain per pop), which
+we did not instrument directly. A bounded queue would exert back-pressure
+here; the unbounded design converts the rate mismatch into memory.
 
-The measured \textsf{ms-retry} arm is a heavier \emph{bundle}: prefix scanning,
+The \textsf{ms-retry} arm remains a heavier \emph{bundle}: prefix scanning,
 maintenance deferred until unpinned, up to 64 advancement probes under
-pressure, and an amortized registry scan every 256 pins. It is worse at 1:7
-(717\,MB and 51\% lower throughput than legacy). Because several mechanisms
-change together, this negative result rejects the bundle but does not apportion
-blame among its components. Hart et al.~\cite{hart2007} showed that reclamation
-scheme choice affects performance; here, implementation details within one EBR
-scheme are themselves material.
+pressure, and an amortized registry scan every 256 pins. The counters now
+apportion part of the blame --- the probes succeed, so the loss is not failed
+advancement --- but the residual split between probe cost and registry-scan
+coherence traffic stays unmeasured. Hart et al.~\cite{hart2007} showed that
+reclamation scheme choice affects performance; here, implementation details
+within one EBR scheme are themselves material.
 
 \subsection{Finite-window work balance}
 \begin{figure}[t]\centering
@@ -501,6 +534,37 @@ moodycamel completes only the v2 warmup row and no measured round before the
 120\,s timeout, during drain/poison handling. Because 64 is only a preallocation
 estimate for this library, we report a harness/configuration incompatibility,
 not a strict-capacity result or a throughput score.
+
+\subsection{Saturation knees under offered load}
+\label{sec:knees}
+\begin{figure}[t]\centering
+\maybefig[loadfull]{fig_loadcurve}{0.9\linewidth}
+\caption{p99 schedule-to-dequeue latency vs.\ offered load at 4:4 $\times1$,
+capacity 1024 (log--log; load + load2 sweeps). Post-knee values measure
+accumulated backlog, by construction of the coordinated-omission-aware
+timestamping.}
+\label{fig:loadcurve}
+\end{figure}
+Sweeping the offered rate from 0.25 to 24\,M msg/s at the 4:4 dedicated shape
+locates each design's saturation knee (Fig.~\ref{fig:loadcurve}). Because
+payloads carry scheduled send times, once offered load exceeds sustainable
+throughput the reported latency grows toward seconds of accumulated backlog
+--- the curve's vertical segment is the knee, not a tail measurement. Below
+saturation (through 4\,M msg/s) every design delivers sub-millisecond p99 and
+the differences are scheduler-noise dominated. The knees order as the
+saturated-throughput ranking predicts: Michael--Scott and the mutex saturate
+between 4 and 6\,M msg/s, Vyukov between 6 and 8, and both ticket variants
+last --- the FAA queue still posts a 0.4\,\textmu s median at 8\,M msg/s,
+where the CAS/ticket variant has climbed to 25\,\textmu s and every other
+design is at millisecond scale or beyond. The mutex is the only design with a
+visible pre-knee gradient (median 0.8${\to}$52\,\textmu s across
+0.25${\to}$4\,M), degrading gracefully where the reservation-based designs
+run flat and then cliff. moodycamel rows at ${\ge}8$\,M msg/s are excluded:
+past its knee, the poison-pill drain protocol's exact-accounting invariant
+fails probabilistically (a pill can overtake older data across its
+sub-queues, stranding messages), which the harness reports as an abort rather
+than a biased tail; its exact-accounting curve ends at 6\,M msg/s,
+unsaturated.
 
 \subsection{Environment screen}
 \begin{figure}[t]\centering

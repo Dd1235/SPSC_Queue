@@ -142,6 +142,56 @@ Three-way A/B/C at the pathological shapes (RSS MB medians | throughput Mops/s):
   unresolved. Legacy h3 4:4 ranges 15–56 MB, which shows variability but does
   not establish a bimodal/tipping-point distribution.
 
+## F8-M — the mechanism, measured (matrix_h3s, stats build, 7 kept rounds; 2026-07-16)
+
+Three counters, one per link of the hypothesized loop (medians):
+
+| ratio | arm | maint µs/pass | adv success | peak limbo (k) | RSS MB | Mops/s |
+|---|---|---|---|---|---|---|
+| 1:7 | ms | 79.6 | 0.09% | 129 | 578 | 5.40 |
+| 1:7 | ms-fix | 21.3 | 0.22% | 929 | 227 | 10.43 |
+| 1:7 | ms-retry | 168.4 | 68.6% | 36 | 645 | 2.61 |
+| 1:1 | ms | 4.6 | 99.9% | 1.3 | 553 | 11.70 |
+| 1:1 | ms-fix | 4.7 | 99.9% | 3.5 | 598 | 11.69 |
+
+Verdicts:
+1. **The fix wins on the cost link, not the epoch link.** Advance success
+   stays <0.3% in both modes at 1:7; maintenance drops 79.6 → 21.3 µs/pass.
+   Peak limbo is LARGER under the fix (backlog spikes, clears in bulk) while
+   total RSS is 2.6× lower. RSS/throughput effects replicate under
+   instrumentation (578→227 MB, 5.4→10.4 Mops/s).
+2. **Advancement is neither necessary nor sufficient.** ms-retry's probes
+   succeed (68.6% at 1:7, smallest limbo peaks) and it still posts the worst
+   RSS and throughput with 168 µs passes. The binding quantity is maintenance
+   cost in the consumers' pop path.
+3. **The 1:1 boundary is resolved: not reclamation.** Both modes show ≥99.8%
+   advance success, ~4.6 µs passes, ≤3.5k peak limbo — reclamation is healthy
+   — yet ~550–600 MB RSS. Remaining candidate: live-queue growth (producer
+   outruns the consumer, which pays retire+maintain per pop). Not directly
+   instrumented (no live-node counter); stated as exoneration + inference.
+
+## F9 — saturation knees (matrix_load + matrix_load2, 5+6 kept rounds; 2026-07-16)
+
+p50 medians (µs) at 4:4 ×1 cap 1024, offered rate sweep 0.25–24M msg/s;
+scheduled-time payloads mean post-knee values measure backlog (seconds scale):
+
+- Knees: **ms and mutex 4–6M; vyukov 6–8M; casticket ~8–12M; faa 8–12M** —
+  same order as saturated-mode throughput. FAA p50 at 8M offered = 0.4 µs
+  while casticket = 24.7 µs and every other arm ≥ ms-scale.
+- **Mutex uniquely degrades gracefully pre-knee**: p50 0.8→3.8→14.2→52.5 µs
+  across 0.25/1/2/4M. Reservation designs run flat (≤1 µs) then cliff.
+- Below saturation (≤4M) every design delivers sub-ms p99; ordering there is
+  scheduler-noise dominated (large IQRs) — the knee, not the sub-knee tail,
+  is the informative statistic.
+
+**Edge finding (moody, latency ≥8M):** past its knee, moody probabilistically
+strands 1–162 messages (pills overtake older data across sub-queues — its
+documented ordering semantics violate the drain protocol's assumption); the
+exact-accounting invariant aborts (exit 3) in 6/42 arm-rounds. Excluded
+symmetrically (dataset_utils + run_matrix documented skip); its
+exact-accounting curve ends at 6M, unsaturated. The hardened invariant turned
+a silently biased tail into a loud, documented exclusion.
+
 **Phase F remaining:** (1) ~~results prose~~ DONE 2026-07-07 (main.tex fully drafted from v2); (2) ARTIFACT.md; (3) venue deadline check; (4) human rewrite pass; (5) optional: fairness figure for F5, cross-machine invitation via artifact.
 
 ### Appendix: QoS table (throughput Mops/s, 4P:4C, ×1, matrix v1 medians)
