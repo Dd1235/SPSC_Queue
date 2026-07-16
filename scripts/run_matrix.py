@@ -4,15 +4,14 @@
 Drives benchmarks/bench_mpmc (one process per trial -> one CSV row) with the
 thermal discipline the fanless M2 requires:
 
-  * ROUND-ROBIN interleaving: within each trial round we iterate SHAPES
-    (mode/ratio/qos/oversubscription) and run EVERY queue back-to-back inside a
-    shape. Cross-queue comparisons -- the thing the paper plots -- are therefore
-    taken under near-identical thermal state; slow drift penalizes all queues
-    equally instead of whichever happened to run last.
+  * WITHIN-SHAPE interleaving: each trial round iterates the shapes and runs
+    every queue back-to-back inside a shape.  The committed paper protocol uses
+    a fixed queue order; --rotate-queues enables deterministic rotation for new
+    studies.  Cross-queue observations within a shape are close in time.
   * cooldown gaps between trials and rounds;
   * per-trial spin-calibration is recorded by the binary itself (calib_ns
     column) so plots can screen for thermal drift after the fact;
-  * each trial runs under a hard timeout and failures are logged, not fatal.
+  * each trial runs under a hard timeout; any failed arm makes the command fail.
 
 Trial 0 of every config is warmup by convention and dropped by make_plots.py.
 
@@ -22,13 +21,23 @@ Usage:
 """
 
 import argparse
-import itertools
+import csv
+import math
 import subprocess
 import sys
 import time
 from pathlib import Path
 
-QUEUES = ["ms", "vyukov", "vyukov-b", "faa", "casticket", "mutex", "moody"]  # +spsc at 1:1
+DEFAULT_QUEUES = ["ms", "vyukov", "vyukov-b", "faa", "casticket", "mutex", "moody"]
+FOCUS_QUEUES = {
+    "h3": ["ms", "ms-fix", "ms-retry", "mutex"],
+    "load": ["ms", "vyukov", "faa", "casticket", "mutex", "moody"],
+}
+KNOWN_QUEUES = set(DEFAULT_QUEUES) | {"ms-fix", "ms-retry", "spsc"}
+CSV_KEY_COLUMNS = [
+    "queue", "mode", "producers", "consumers", "oversubscribe", "capacity",
+    "qos", "seconds", "rate", "trial",
+]
 
 
 def shapes(smoke: bool, focus: str = ""):
@@ -40,14 +49,14 @@ def shapes(smoke: bool, focus: str = ""):
                        oversubscribe=1, qos="none")
         return
     if focus == "load":
-        # F9: latency-vs-offered-load curves (saturation knees), 4P:4C x1.
+        # Optional offered-rate extension: schedule-to-dequeue latency, 4P:4C x1.
         for rate in (250_000, 500_000, 1_000_000, 2_000_000, 4_000_000):
             yield dict(mode="latency", producers=4, consumers=4, oversubscribe=1,
                        qos="none", rate=rate)
         return
     if focus == "h1":
         # The F1-attribution subset: oversubscription sweep + capacity control +
-        # the 1:1/2:2 cliff + P/E extremes + paced tails. ~8 arms x 12 shapes.
+        # the 1:1/2:2 cliff + QoS-policy extremes + paced tails. ~8 arms x 12 shapes.
         for f in (1, 2, 4):
             yield dict(mode="throughput", producers=4, consumers=4, oversubscribe=f,
                        qos="none")
@@ -88,11 +97,123 @@ def shapes(smoke: bool, focus: str = ""):
                    rate=1_000_000)
 
 
+def is_documented_skip(shape, queue):
+    """The exact moodycamel arm documented as incompatible with this harness."""
+    return (
+        queue == "moody"
+        and shape["mode"] == "throughput"
+        and shape["producers"] == 4
+        and shape["consumers"] == 4
+        and shape["oversubscribe"] == 4
+        and shape.get("capacity", 1024) == 64
+        and shape["qos"] == "none"
+    )
+
+
 def queues_for(shape, queues):
     qs = list(queues)
     if shape["producers"] == 1 and shape["consumers"] == 1 and shape["oversubscribe"] == 1:
         qs.append("spsc")  # the 1:1 baseline row
-    return qs
+    return [queue for queue in qs if not is_documented_skip(shape, queue)]
+
+
+def float_key(value):
+    """Canonical, exact key for a CSV double (works with old decimal rows too)."""
+    return float(value).hex()
+
+
+def run_key(shape, queue, trial, seconds):
+    return (
+        queue,
+        shape["mode"],
+        int(shape["producers"]),
+        int(shape["consumers"]),
+        int(shape["oversubscribe"]),
+        int(shape.get("capacity", 1024)),
+        shape["qos"],
+        float_key(seconds),
+        float_key(shape.get("rate", 1_000_000)),
+        int(trial),
+    )
+
+
+def row_key(row):
+    try:
+        return (
+            row["queue"],
+            row["mode"],
+            int(row["producers"]),
+            int(row["consumers"]),
+            int(row["oversubscribe"]),
+            int(row["capacity"]),
+            row["qos"],
+            float_key(row["seconds"]),
+            float_key(row["rate"]),
+            int(row["trial"]),
+        )
+    except (KeyError, TypeError, ValueError) as exc:
+        raise ValueError(f"malformed existing CSV row: {exc}") from exc
+
+
+def read_existing(out):
+    with out.open(newline="") as handle:
+        reader = csv.DictReader(handle)
+        if reader.fieldnames is None:
+            raise ValueError(f"existing output is empty or lacks a CSV header: {out}")
+        missing = [column for column in CSV_KEY_COLUMNS if column not in reader.fieldnames]
+        if missing:
+            raise ValueError(f"existing output lacks columns {missing}: {out}")
+        rows = list(reader)
+    keys = [row_key(row) for row in rows]
+    if len(keys) != len(set(keys)):
+        raise ValueError(f"existing output contains duplicate configuration/trial rows: {out}")
+    return reader.fieldnames, rows, set(keys)
+
+
+def rewrite_complete_prefix(out, fieldnames, rows, keep_trials):
+    temp = out.with_name(out.name + ".resume-tmp")
+    with temp.open("w", newline="") as handle:
+        writer = csv.DictWriter(handle, fieldnames=fieldnames)
+        writer.writeheader()
+        writer.writerows(row for row in rows if int(row["trial"]) in keep_trials)
+    temp.replace(out)
+
+
+def prepare_output(out, planned, trials, overwrite, resume):
+    """Refuse accidental append; resume only after complete round boundaries."""
+    if overwrite and out.exists():
+        out.unlink()
+    if not out.exists():
+        return set()
+    if not resume:
+        raise ValueError(
+            f"output already exists: {out} (choose a new path, --overwrite, or --resume)"
+        )
+
+    fieldnames, rows, existing = read_existing(out)
+    planned_set = set(planned)
+    extras = existing - planned_set
+    if extras:
+        raise ValueError(
+            f"existing output contains {len(extras)} rows outside this matrix; "
+            "use a different path or --overwrite"
+        )
+
+    keep_trials = set()
+    for trial in range(trials):
+        expected = {key for key in planned_set if key[-1] == trial}
+        actual = {key for key in existing if key[-1] == trial}
+        if actual != expected:
+            break
+        keep_trials.add(trial)
+    kept = {key for key in existing if key[-1] in keep_trials}
+    if kept != existing:
+        removed = len(existing - kept)
+        rewrite_complete_prefix(out, fieldnames, rows, keep_trials)
+        print(f"resume: discarded {removed} rows from an incomplete trailing round", flush=True)
+    if keep_trials:
+        print(f"resume: keeping complete rounds 0..{max(keep_trials)}", flush=True)
+    return kept
 
 
 def run_one(bench, shape, queue, trial, seconds, out, timeout):
@@ -128,49 +249,139 @@ def main():
                     help="trials per config INCLUDING the warmup trial 0")
     ap.add_argument("--seconds", type=float, default=2.0)
     ap.add_argument("--timeout", type=float, default=120.0)
-    ap.add_argument("--queues", default=",".join(QUEUES))
+    ap.add_argument("--queues",
+                    help="comma-separated queue list (focus profiles have tailored defaults)")
     ap.add_argument("--smoke", action="store_true", help="tiny matrix for pipeline testing")
     ap.add_argument("--focus", default="", choices=["", "h1", "h3", "load"],
                     help="named shape subset (h1/h3/load)")
+    output_mode = ap.add_mutually_exclusive_group()
+    output_mode.add_argument("--overwrite", action="store_true",
+                             help="replace an existing output CSV")
+    output_mode.add_argument("--resume", action="store_true",
+                             help="resume after the last complete trial round")
+    ap.add_argument("--cooldown", type=float, default=0.3,
+                    help="seconds between benchmark processes")
+    ap.add_argument("--round-cooldown", type=float, default=2.0,
+                    help="additional seconds between trial rounds")
+    ap.add_argument(
+        "--rotate-queues",
+        action="store_true",
+        help="deterministically rotate queue order by shape/trial (new studies; paper data used fixed order)",
+    )
     args = ap.parse_args()
+
+    if args.trials < 2:
+        ap.error("--trials must be at least 2 (trial 0 is warm-up)")
+    if not math.isfinite(args.seconds) or not math.isfinite(args.timeout) or \
+       args.seconds <= 0 or args.timeout <= 0:
+        ap.error("--seconds and --timeout must be positive")
+    if not math.isfinite(args.cooldown) or not math.isfinite(args.round_cooldown) or \
+       args.cooldown < 0 or args.round_cooldown < 0:
+        ap.error("cooldowns must be non-negative")
+    if args.smoke and args.focus:
+        ap.error("--smoke and --focus are separate matrix profiles; choose one")
 
     bench = Path(args.bench)
     if not bench.exists():
-        sys.exit(f"benchmark binary not found: {bench} (build with -DSPSC_BENCH_THIRDPARTY=ON)")
+        ap.error(f"benchmark binary not found: {bench} (configure/build benchmarks first)")
     out = Path(args.out)
     out.parent.mkdir(parents=True, exist_ok=True)
 
-    queues = [q for q in args.queues.split(",") if q]
+    default_queues = FOCUS_QUEUES.get(args.focus, DEFAULT_QUEUES)
+    queues = [q.strip() for q in (args.queues or ",".join(default_queues)).split(",") if q.strip()]
+    if not queues:
+        ap.error("--queues must name at least one queue")
+    if len(queues) != len(set(queues)):
+        ap.error("--queues contains duplicates")
+    unknown = sorted(set(queues) - KNOWN_QUEUES)
+    if unknown:
+        ap.error("unknown queue(s): " + ", ".join(unknown))
+    if "spsc" in queues:
+        ap.error("spsc is added automatically only for the 1:1 baseline")
+
     # Drop the moody arm automatically when the binary was built without it.
-    probe = subprocess.run([str(bench), "--queue", "moody", "--producers", "1",
-                            "--consumers", "1", "--seconds", "0.05"],
-                           capture_output=True, text=True)
-    if probe.returncode != 0 and "moody" in queues:
-        print("note: binary lacks moodycamel support; dropping 'moody' arm", flush=True)
-        queues.remove("moody")
+    if "moody" in queues:
+        try:
+            probe = subprocess.run([str(bench), "--queue", "moody", "--producers", "1",
+                                    "--consumers", "1", "--seconds", "0.05"],
+                                   capture_output=True, text=True, timeout=min(args.timeout, 10))
+        except subprocess.TimeoutExpired:
+            ap.error("moodycamel capability probe timed out")
+        if probe.returncode != 0:
+            print("note: binary lacks moodycamel support; dropping 'moody' arm", flush=True)
+            queues.remove("moody")
+    if not queues:
+        ap.error("no runnable MPMC queues remain after benchmark capability checks")
 
     shape_list = list(shapes(args.smoke, args.focus))
-    total = sum(len(queues_for(s, queues)) for s in shape_list) * args.trials
-    print(f"matrix: {len(shape_list)} shapes x queues x {args.trials} trials = {total} runs",
-          flush=True)
+    skipped = sum(
+        1 for shape in shape_list for queue in queues if is_documented_skip(shape, queue)
+    ) * args.trials
+
+    planned_runs = []
+    for trial in range(args.trials):
+        for shape_index, shape in enumerate(shape_list):
+            ordered = queues_for(shape, queues)
+            if args.rotate_queues and ordered:
+                offset = (trial + shape_index) % len(ordered)
+                ordered = ordered[offset:] + ordered[:offset]
+            for queue in ordered:
+                planned_runs.append((trial, shape, queue, run_key(shape, queue, trial, args.seconds)))
+
+    try:
+        completed = prepare_output(
+            out,
+            [item[3] for item in planned_runs],
+            args.trials,
+            args.overwrite,
+            args.resume,
+        )
+    except ValueError as exc:
+        ap.error(str(exc))
+
+    total = len(planned_runs)
+    print(f"matrix: {len(shape_list)} shapes, queues={','.join(queues)}, "
+          f"{args.trials} trials = {total} runs", flush=True)
+    if skipped:
+        print(f"documented exclusion: skipped {skipped} moody/cap64/4P:4C/x4 runs",
+              flush=True)
+    print("queue order: " + ("deterministic rotation" if args.rotate_queues
+                             else "fixed (paper-compatible legacy order)"), flush=True)
 
     t0 = time.time()
-    done = 0
+    done = len(completed)
     fails = 0
     for trial in range(args.trials):
+        trial_runs = [item for item in planned_runs if item[0] == trial and item[3] not in completed]
+        if not trial_runs:
+            continue
         print(f"== trial round {trial} ==", flush=True)
-        for shape in shape_list:
-            for queue in queues_for(shape, queues):
-                ok = run_one(bench, shape, queue, trial, args.seconds, out, args.timeout)
-                fails += 0 if ok else 1
-                done += 1
-                time.sleep(0.3)  # cooldown between runs
-        time.sleep(2.0)  # longer cooldown between rounds
+        for _, shape, queue, _ in trial_runs:
+            ok = run_one(bench, shape, queue, trial, args.seconds, out, args.timeout)
+            fails += 0 if ok else 1
+            done += 1
+            time.sleep(args.cooldown)
+        time.sleep(args.round_cooldown)
         print(f"   round {trial} done ({done}/{total}, {fails} failures, "
               f"{time.time()-t0:.0f}s elapsed)", flush=True)
-    print(f"matrix complete: {done} runs, {fails} failures, {time.time()-t0:.0f}s -> {out}",
-          flush=True)
+
+    try:
+        _, _, written = read_existing(out)
+    except ValueError as exc:
+        ap.error(str(exc))
+    missing = set(item[3] for item in planned_runs) - written
+    print(f"matrix complete: {len(written)}/{total} rows, {fails} process failures, "
+          f"{time.time()-t0:.0f}s -> {out}", flush=True)
+    if missing:
+        print(f"ERROR: output is missing {len(missing)} planned rows; resume with --resume",
+              file=sys.stderr)
+    if fails and not missing:
+        print(f"ERROR: {fails} benchmark process(es) exited unsuccessfully",
+              file=sys.stderr)
+    if missing or fails:
+        return 1
+    return 0
 
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())
