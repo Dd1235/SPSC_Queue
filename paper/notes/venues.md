@@ -1,4 +1,21 @@
-# Venue plan (checked 2026-07-07 — re-verify dates before acting)
+# Venue plan (updated 2026-07-16 — re-verify dates before acting)
+
+## Strategy update (2026-07-16): deepen-the-platform
+
+A second physical platform is not available for now, so the paper's identity
+is a *definitive single-system case study*: observed cluster residency +
+energy per op (powermetrics), industrial cross-check arms (rigtorp MPMC,
+xenium MS+hazard-pointers), sustained thermal characterization, bootstrap
+CIs. Venue ladder reordered accordingly:
+
+1. **ICPE 2027** (research track; LTB workshop as safety net) — best fit for
+   the methodology/artifact strengths; single-system studies are normal there.
+2. **JSys** — artifact-mandatory rolling journal; welcomes case studies and
+   negative results. Can run in parallel with a conference plan? Check their
+   concurrent-submission policy first.
+3. **PMAM@PPoPP / ISPASS poster or short paper** — fallbacks.
+4. **ISPASS/IISWC main track** — after a second platform (ideally Alder Lake:
+   P/E cores AND affinity) reruns the core matrix.
 
 ## Timing reality (as of July 2026)
 
