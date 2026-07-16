@@ -49,6 +49,11 @@
 //               several mechanisms together, the data do not assign that loss
 //               to any one component.
 //
+// MECHANISM INSTRUMENTATION (SPSC_QUEUE_STATS builds only): peak limbo size,
+// maintenance pass count/duration, and epoch-advance attempt/success counts.
+// Purpose: measure the scan-cost feedback loop directly instead of inferring
+// it ("consistent with") from RSS and throughput alone. Compiled only into
+// the stats twin binary so the headline numbers stay unperturbed.
 #pragma once
 
 #include <atomic>
@@ -57,6 +62,10 @@
 #include <mutex>
 #include <stdexcept>
 #include <vector>
+
+#ifdef SPSC_QUEUE_STATS
+#include <chrono>
+#endif
 
 namespace mpmc::ebr {
 
@@ -87,6 +96,22 @@ struct Domain {
     std::mutex orphanMu;           // cold path: thread exit + orphan drain
     std::vector<Retired> orphans;  // guarded by orphanMu
 
+#ifdef SPSC_QUEUE_STATS
+    // F8 mechanism counters (see header note). Relaxed: diagnostic only.
+    std::atomic<std::uint64_t> statLimboPeak{0};
+    std::atomic<std::uint64_t> statMaintPasses{0};
+    std::atomic<std::uint64_t> statMaintNs{0};
+    std::atomic<std::uint64_t> statAdvanceAttempts{0};
+    std::atomic<std::uint64_t> statAdvanceSuccesses{0};
+
+    void stat_limbo_peak(std::uint64_t v) {
+        std::uint64_t cur = statLimboPeak.load(std::memory_order_relaxed);
+        while (cur < v && !statLimboPeak.compare_exchange_weak(cur, v,
+                                                               std::memory_order_relaxed)) {
+        }
+    }
+#endif
+
     static Domain& instance() {
         static Domain d;
         return d;
@@ -95,14 +120,21 @@ struct Domain {
     // Advance the global epoch iff every pinned thread is on the current one.
     // Loads are seq_cst to order against the seq_cst pin stores in Guard.
     bool try_advance() {
+#ifdef SPSC_QUEUE_STATS
+        statAdvanceAttempts.fetch_add(1, std::memory_order_relaxed);
+#endif
         const std::uint64_t e = globalEpoch.load(std::memory_order_seq_cst);
         for (std::size_t i = 0; i < kMaxThreads; ++i) {
             const std::uint64_t pinned = slots[i].epoch.load(std::memory_order_seq_cst);
             if (pinned != kIdle && pinned != e) return false;  // straggler
         }
         std::uint64_t expected = e;
-        return globalEpoch.compare_exchange_strong(expected, e + 1, std::memory_order_seq_cst,
-                                                   std::memory_order_relaxed);
+        const bool ok = globalEpoch.compare_exchange_strong(
+            expected, e + 1, std::memory_order_seq_cst, std::memory_order_relaxed);
+#ifdef SPSC_QUEUE_STATS
+        if (ok) statAdvanceSuccesses.fetch_add(1, std::memory_order_relaxed);
+#endif
+        return ok;
     }
 };
 
@@ -176,6 +208,9 @@ struct ThreadCtx {
     }
 
     void maintain() {
+#ifdef SPSC_QUEUE_STATS
+        const auto statT0 = std::chrono::steady_clock::now();
+#endif
         const int mode = dom.reclaimMode.load(std::memory_order_relaxed);
         if (mode == kRetry && limbo.size() > kLimboHighWater) {
             // The heavy variant (kept as a measured negative result): retry
@@ -204,6 +239,14 @@ struct ThreadCtx {
             }
             dom.orphans.resize(okept);
         }
+#ifdef SPSC_QUEUE_STATS
+        dom.statMaintPasses.fetch_add(1, std::memory_order_relaxed);
+        dom.statMaintNs.fetch_add(
+            static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(
+                                           std::chrono::steady_clock::now() - statT0)
+                                           .count()),
+            std::memory_order_relaxed);
+#endif
     }
 };
 
@@ -264,6 +307,9 @@ template <class T> inline void retire(T* p) {
     detail::ThreadCtx& ctx = detail::tls();
     const std::uint64_t e = ctx.dom.globalEpoch.load(std::memory_order_acquire);
     ctx.limbo.push_back({p, [](void* q) { delete static_cast<T*>(q); }, e});
+#ifdef SPSC_QUEUE_STATS
+    ctx.dom.stat_limbo_peak(ctx.limbo.size());
+#endif
     if (++ctx.sinceMaintain >= kRetireThreshold) {
         ctx.sinceMaintain = 0;
         if (ctx.dom.reclaimMode.load(std::memory_order_relaxed) == kRetry) {
@@ -273,6 +319,38 @@ template <class T> inline void retire(T* p) {
         }
     }
 }
+
+#ifdef SPSC_QUEUE_STATS
+// F8 mechanism snapshot (stats builds only). Peak PER-THREAD limbo size,
+// maintenance pass count and total duration, and advance attempt/success
+// counts, accumulated since process start (or the last reset). A fresh
+// process per trial means the benchmark never needs the reset; tests do.
+struct MechStats {
+    std::uint64_t limbo_peak;
+    std::uint64_t maint_passes;
+    std::uint64_t maint_ns;
+    std::uint64_t advance_attempts;
+    std::uint64_t advance_successes;
+};
+
+inline MechStats mech_stats() {
+    detail::Domain& dom = detail::Domain::instance();
+    return {dom.statLimboPeak.load(std::memory_order_relaxed),
+            dom.statMaintPasses.load(std::memory_order_relaxed),
+            dom.statMaintNs.load(std::memory_order_relaxed),
+            dom.statAdvanceAttempts.load(std::memory_order_relaxed),
+            dom.statAdvanceSuccesses.load(std::memory_order_relaxed)};
+}
+
+inline void mech_stats_reset() {
+    detail::Domain& dom = detail::Domain::instance();
+    dom.statLimboPeak.store(0, std::memory_order_relaxed);
+    dom.statMaintPasses.store(0, std::memory_order_relaxed);
+    dom.statMaintNs.store(0, std::memory_order_relaxed);
+    dom.statAdvanceAttempts.store(0, std::memory_order_relaxed);
+    dom.statAdvanceSuccesses.store(0, std::memory_order_relaxed);
+}
+#endif
 
 // Free EVERYTHING immediately, ignoring epochs. Only legal when the caller
 // guarantees no thread is concurrently inside any protected operation
