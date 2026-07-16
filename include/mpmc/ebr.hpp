@@ -38,16 +38,24 @@
 //               form a prefix; free until the first survivor and erase once.
 //               With a vector, an erase shifts survivors, so a freeing pass
 //               remains O(limbo), but a no-expiration pass is O(1) instead of
-//               rewriting the whole list. A scan-cost feedback loop is
-//               consistent with the result, but limbo size and maintenance
-//               time were not instrumented and the 1:1 boundary remains
-//               unresolved.
+//               rewriting the whole list. The instrumented replication
+//               (matrix h3s; counters below) measured the mechanism: at 1:7
+//               the fix cuts maintenance from 79.6 to 21.3 us/pass while the
+//               advance success rate stays <0.3% in BOTH modes -- it wins by
+//               making stuck-epoch passes cheap, not by unsticking the epoch.
+//               At 1:1 the counters exonerate reclamation entirely (>=99.8%
+//               advance success, ~4.6 us passes, tiny limbo) -- the residual
+//               ~550 MB there is producer-outruns-consumer live-queue growth,
+//               not reclamation lag.
 //   kRetry   -- the "obvious" heavier remediation (defer maintenance past the
 //               unpin + retry advancement until two successes + amortized
 //               pin-path advances). The measured bundle is slower and uses
-//               more memory at consumer-heavy shapes. Because it changes
-//               several mechanisms together, the data do not assign that loss
-//               to any one component.
+//               more memory at consumer-heavy shapes. The counters partially
+//               de-bundle it: its advancement probes SUCCEED (69% advance
+//               success at 1:7, smallest limbo peaks) and it still loses, so
+//               the harm is pass cost (168 us), not failed advancement; the
+//               split between probe cost and registry-scan coherence traffic
+//               stays unmeasured.
 //
 // MECHANISM INSTRUMENTATION (SPSC_QUEUE_STATS builds only): peak limbo size,
 // maintenance pass count/duration, and epoch-advance attempt/success counts.
