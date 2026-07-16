@@ -203,7 +203,7 @@ policy (medians, cap 1024):
 | 1:1 ×1 | 125.6 | 120.3 | structures agree at low contention (−4%) |
 | 4:4 ×1 | 16.4 | 9.6 | busy-spin −41% even on dedicated cores |
 | 4:4 ×2 | 19.2 | 0.12 | collapse |
-| 4:4 ×4 | **29.6** | **0.04** | 700× apart; rigtorp worse than Vyukov (1.66) |
+| 4:4 ×4 | **29.6** | **0.04** | ~820× apart; rigtorp worse than Vyukov (1.66) |
 | paced 1M ×1 p50 | 0.4 µs | 0.4 µs | below saturation they match |
 | paced 1M ×4 p50 | 0.9 ms | **25.7 s** | can't sustain 1M offered at ×4 |
 
@@ -234,10 +234,37 @@ vs our MS+EBR-legacy, same rounds:
   153–227 MB at 1:7 remains the best MS result; the fixable part was
   EBR-specific, the floor is not.)
 - **HP's per-traversal cost lands on consumers:** throughput parity at 1:1
-  (+2%), −43% at 1:7 — cost grows with consumer parallelism, the textbook
+  (+2%), −45% at 1:7 — cost grows with consumer parallelism, the textbook
   HP-vs-EBR tradeoff measured on client silicon (Hart et al. one level down).
 - Bonus corner: at cap64 ×4 the unbounded arms win (ms 4.94, xenium 3.64 vs
   faa 2.46, mutex 4.54, vyukov 0.88) — no backpressure to fight.
+
+## T — sustained-load thermal series (matrix_thermal, 4 designs × 30 × 10 s; 2026-07-16)
+
+Protocol: per design, thirty back-to-back 10 s process trials at 4:4 ×1 cap
+1024 (heat IS the treatment); 180 s cooldown between designs; fixed order
+faa→vyukov→ms→mutex; each design's early-soak calib returning to ~95–96 ms
+bounds order carryover. Median of last 5 soaks vs median of first 3 (cold):
+
+| design | hot/cold throughput | calib cold→hot (ms) |
+|---|---|---|
+| faa | **101.9%** | 95.5 → 95.9 (flat) |
+| mutex | 91.4% | 96.0 → 108.2 |
+| vyukov | 90.6% | 95.4 → 124.4 (ends 213) |
+| ms | 81.3% | 96.1 → 116.9 |
+
+- **T1 (decay):** design-dependent, 0–19% over ~5 min. The FAA ticket queue
+  is thermally flat AND leaves the probe cold — its yielding slot waits keep
+  the SoC inside its passive budget; the spin/retry designs heat the chip and
+  shed 9–19%.
+- **T2 (ranking):** the 4:4 ordering (mutex > faa > vyukov > ms) shows no
+  crossings across the soak — sustained heat does not reorder this shape.
+- **T3 (attribution):** ms decay (−19%) is commensurate with its calib climb
+  (+22%); vyukov decays less (−9%) than its calib suggests (+30%) — spin
+  throughput is less frequency-sensitive than the probe; faa flat/flat.
+- Artifacts reported, not hidden: 3 of 120 soaks are isolated near-zero
+  trials (external interference); last-5 medians are robust to them.
+  Ambient/charger uncontrolled (lid open, on charger, indoor ambient).
 
 **Phase F remaining:** (1) ~~results prose~~ DONE 2026-07-07 (main.tex fully drafted from v2); (2) ARTIFACT.md; (3) venue deadline check; (4) human rewrite pass; (5) optional: fairness figure for F5, cross-machine invitation via artifact.
 

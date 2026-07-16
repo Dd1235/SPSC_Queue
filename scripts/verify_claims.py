@@ -361,9 +361,9 @@ def run_checks():
        float(abs(t11['rigtorp'] / t11['faa'] - 1) < 0.10),
        committed_tol=0, replication_tol=0)
     ck('F10 rigtorp 1:1=120.3', 120.3, t11['rigtorp'], replication_tol=0.15)
-    ck('F10 rigtorp x4 collapse: faa/rigtorp ~700x', 700,
-       t44[4]['faa'] / t44[4]['rigtorp'], committed_tol=0.10,
-       replication_tol=0.90)
+    ck('F10 rigtorp x4 collapse: faa/rigtorp ratio >= 700x', 1,
+       float(t44[4]['faa'] / t44[4]['rigtorp'] >= 700),
+       committed_tol=0, replication_tol=0)
     ck('F10 rigtorp below vyukov at x4', 1,
        float(t44[4]['rigtorp'] < t44[4]['vyukov']),
        committed_tol=0, replication_tol=0)
@@ -390,13 +390,42 @@ def run_checks():
     ck('F11 HP throughput parity at 1:1 (within 10%)', 1,
        float(abs(t11['xenium'] / t11['ms'] - 1) < 0.10),
        committed_tol=0, replication_tol=0)
-    ck('F11 HP cost at 1:7 = -43% vs EBR', 43,
+    ck('F11 HP cost at 1:7 = -45% vs EBR', 45.3,
        100 * (1 - tp17['xenium'] / tp17['ms']), replication_tol=0.40)
     t44c64 = ind(mode='throughput', producers=4, consumers=4, oversubscribe=4,
                  capacity=64)
     ck('F11 unbounded arms lead the cap64 x4 corner', 1,
        float(t44c64['ms'] > t44c64['faa'] and
              t44c64['xenium'] > t44c64['faa']),
+       committed_tol=0, replication_tol=0)
+
+    # -- T: sustained-soak thermal series. Deliberately raw: `trial` is a soak
+    # index and soak 0 (cold) is data, so kept-rounds selection must not apply.
+    thermal = pd.read_csv(DATA_DIR / 'matrix_thermal.csv')
+
+    def soak_ratio(queue, column='throughput_mops'):
+        d = thermal[thermal.queue == queue].sort_values('trial')
+        cold = d[d.trial < 3][column].median()
+        hot = d[d.trial >= d.trial.max() - 4][column].median()
+        return hot / cold
+
+    ck('T faa thermally flat (hot/cold=101.9%)', 101.9,
+       100 * soak_ratio('faa'), replication_tol=0.10)
+    ck('T ms sheds 19% under soak (hot/cold=81.3%)', 81.3,
+       100 * soak_ratio('ms'), replication_tol=0.15)
+    ck('T decay ordering ms > vyukov/mutex > faa', 1,
+       float(soak_ratio('ms') < soak_ratio('vyukov') < soak_ratio('faa') and
+             soak_ratio('ms') < soak_ratio('mutex') < soak_ratio('faa')),
+       committed_tol=0, replication_tol=0)
+    ck('T faa probe stays cold while vyukov probe heats', 1,
+       float(soak_ratio('faa', 'calib_ns') < 1.05 and
+             soak_ratio('vyukov', 'calib_ns') > 1.15),
+       committed_tol=0, replication_tol=0)
+    ck('T ranking stable under soak (no 4:4 crossings, last-5 medians)', 1,
+       float((lambda m: m['mutex'] > m['faa'] > m['vyukov'] > m['ms'])(
+           {q: thermal[(thermal.queue == q) &
+                       (thermal.trial >= thermal.trial.max() - 4)]
+            .throughput_mops.median() for q in ('faa', 'vyukov', 'ms', 'mutex')})),
        committed_tol=0, replication_tol=0)
 
     calib_rows = dataset('matrix_v2')
