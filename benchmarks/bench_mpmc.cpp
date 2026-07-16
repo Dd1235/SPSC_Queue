@@ -174,6 +174,11 @@ struct Result {
     long vcsw = 0, ivcsw = 0;     // voluntary / involuntary context switches
     double retries_per_op = 0;    // stats build: queue-specific primary counter
     double secondary_per_op = 0;  // stats build: queue-specific secondary counter
+    // Stats build, ms* arms only (F8 mechanism): peak per-thread limbo size,
+    // mean maintenance-pass duration, and advance success ratio. Zero elsewhere.
+    double ebr_limbo_peak = 0;
+    double ebr_maint_ns_per_pass = 0;
+    double ebr_adv_success_rate = 0;
 };
 
 [[noreturn]] void invalid_number(const char* flag, const char* value, const char* expected) {
@@ -501,15 +506,18 @@ void write_csv(const Config& cfg, const Result& r) {
         std::fprintf(f, "queue,mode,producers,consumers,oversubscribe,capacity,qos,seconds,"
                         "rate,trial,ops,elapsed_s,throughput_mops,mean_ns,p50_ns,p99_ns,"
                         "p999_ns,max_ns,fair_cov,cons_cov,vcsw,ivcsw,retries_per_op,"
-                        "secondary_per_op,calib_ns,peak_rss_mb,unix_time\n");
+                        "secondary_per_op,ebr_limbo_peak,ebr_maint_ns_per_pass,"
+                        "ebr_adv_success_rate,calib_ns,peak_rss_mb,unix_time\n");
     std::fprintf(
         f,
         "%s,%s,%d,%d,%d,%zu,%s,%.17g,%.17g,%d,%" PRIu64 ",%.4f,%.3f,%.1f,%" PRIu64 ",%" PRIu64
-        ",%" PRIu64 ",%" PRIu64 ",%.4f,%.4f,%ld,%ld,%.4f,%.4f,%" PRIu64 ",%.1f,%ld\n",
+        ",%" PRIu64 ",%" PRIu64 ",%.4f,%.4f,%ld,%ld,%.4f,%.4f,%.0f,%.1f,%.4f,%" PRIu64
+        ",%.1f,%ld\n",
         cfg.queue.c_str(), cfg.mode.c_str(), cfg.producers, cfg.consumers, cfg.oversubscribe,
         cfg.capacity, cfg.qos.c_str(), cfg.seconds, cfg.rate, cfg.trial, r.ops, r.elapsed,
         r.ops / r.elapsed / 1e6, r.mean_ns, r.p50, r.p99, r.p999, r.mx, r.fair_cov, r.cons_cov,
-        r.vcsw, r.ivcsw, r.retries_per_op, r.secondary_per_op, r.calib_ns, r.peak_rss_mb,
+        r.vcsw, r.ivcsw, r.retries_per_op, r.secondary_per_op, r.ebr_limbo_peak,
+        r.ebr_maint_ns_per_pass, r.ebr_adv_success_rate, r.calib_ns, r.peak_rss_mb,
         static_cast<long>(std::time(nullptr)));
     std::fclose(f);
 }
@@ -632,6 +640,19 @@ int main(int argc, char** argv) {
 #endif
     else
         std::abort();  // validated above; keeps dispatch exhaustive
+#ifdef SPSC_QUEUE_STATS
+    if (cfg.queue.rfind("ms", 0) == 0) {
+        // Fresh process per trial, so counters accumulate exactly this run.
+        const mpmc::ebr::MechStats es = mpmc::ebr::mech_stats();
+        r.ebr_limbo_peak = static_cast<double>(es.limbo_peak);
+        if (es.maint_passes > 0)
+            r.ebr_maint_ns_per_pass =
+                static_cast<double>(es.maint_ns) / static_cast<double>(es.maint_passes);
+        if (es.advance_attempts > 0)
+            r.ebr_adv_success_rate = static_cast<double>(es.advance_successes) /
+                                     static_cast<double>(es.advance_attempts);
+    }
+#endif
     r.calib_ns = calib;
     r.peak_rss_mb = peak_rss_mb();
     rusage ru1{};
