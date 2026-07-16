@@ -11,6 +11,7 @@
 % rounds), matrix_v3s.csv (1.5 s instrumented profile, 2 kept rounds),
 % matrix_load.csv + matrix_load2.csv (offered-load sweeps, 5 + 6 kept rounds),
 % matrix_ind.csv (industrial cross-checks: rigtorp, xenium; 8 kept rounds),
+% matrix_thermal.csv (sustained-soak time series; NOT round-selected),
 % and matrix_v1.csv (first replication);
 % aggregation = scripts/make_plots.py; claim->data map = notes/claims.md.
 \documentclass[conference]{IEEEtran}
@@ -60,7 +61,7 @@ a progress-class comparison. Parent controls show that yielding backoff does
 not rescue the CAS design and that FAA is not necessary for the ticket design's
 qualitative profile; at capacity 64, however, both ticket variants collapse.
 An industrial cross-check sharpens the attribution: rigtorp's busy-spinning
-ticket queue matches ours at 1:1 and collapses ${\sim}700\times$ under
+ticket queue matches ours at 1:1 and collapses over $700\times$ under
 oversubscription, so the robustness is an interaction of ticket structure
 with yielding waits.
 Requesting background rather than interactive QoS for all workers reverses the ranking,
@@ -454,7 +455,7 @@ contention, which is also the regime rigtorp documents itself for, and its
 paced-load p50 matches ours (0.4\,\textmu s at 1\,M msg/s). Under load they
 diverge catastrophically: $-41\%$ at dedicated 4:4, then 0.12 and 0.04\,Mops/s
 at $\times2$/$\times4$ where our queue \emph{rises} to 29.6 --- a
-${\sim}700\times$ gap within one coordination structure, leaving rigtorp
+gap exceeding $700\times$ (median ratio ${\approx}820\times$) within one coordination structure, leaving rigtorp
 below Vyukov (1.66). At $\times4$ paced load it cannot sustain 1\,M msg/s
 (p50 = 25.7\,s of backlog). This completes the attribution design of
 Sec.~\ref{sec:oversub}: yielding politeness changed nothing inside the
@@ -473,7 +474,7 @@ plus rate mismatch, not reclamation mechanics, is the first-order cause; the
 EBR-specific cost spiral was the fixable amplifier on top (prefix fix:
 153--227\,MB at the same shape). The scheme swap also prices the textbook
 HP-versus-EBR tradeoff on this platform: throughput parity at 1:1 ($+2\%$)
-degrading to $-43\%$ at 1:7 --- HP's per-traversal fences ride the consumer
+degrading to $-45\%$ at 1:7 --- HP's per-traversal fences ride the consumer
 side, so its cost grows with consumer parallelism, extending Hart et
 al.~\cite{hart2007} to asymmetric client silicon. One corner also inverts:
 at capacity 64 under $\times4$, the unbounded arms lead (4.94/3.64 vs.\ 2.46
@@ -653,6 +654,35 @@ sub-queues, stranding messages), which the harness reports as an abort rather
 than a biased tail; its exact-accounting curve ends at 6\,M msg/s,
 unsaturated.
 
+\subsection{Sustained load on a fanless chassis}
+\label{sec:thermal}
+\begin{figure}[t]\centering
+\maybefig[thermal]{fig_thermal}{\linewidth}
+\caption{Sustained-soak series: thirty back-to-back 10\,s process trials per
+design at 4:4, 180\,s cooldowns between designs. Left: throughput normalized
+to each design's cold baseline (first three soaks). Right: the pinned
+calibration probe as thermometer.}
+\label{fig:thermal}
+\end{figure}
+The matrix protocol interleaves and cools deliberately, which \emph{hides}
+sustained-heat effects; a separate soak series measures them
+(Fig.~\ref{fig:thermal}). Heat is the treatment: one design at a time runs
+thirty consecutive 10\,s trials. After roughly five minutes, decay is
+design-dependent: MS sheds 19\% of its cold throughput, the mutex and Vyukov
+about 9\%, and the FAA ticket queue is thermally flat (101.9\% of cold) ---
+and it is also the only design whose calibration probe never warms
+(95.5${\to}$95.9\,ms, versus 95${\to}$124\,ms under Vyukov). Yielding slot
+waits keep the package inside its passive envelope; spinning and retrying
+heat it. The 4:4 ranking shows no crossings under soak, so sustained heat
+rescales but does not reorder this shape. MS's decay is commensurate with
+its probe climb; Vyukov decays less than its probe suggests, so spin
+throughput is less frequency-sensitive than the calibration loop. Three of
+120 soaks are isolated near-zero outliers (external interference; the
+last-five medians are robust to them), the design order is fixed with each
+design's early-soak probe returning to the 95--96\,ms cold band, and ambient
+temperature and charger state were not controlled beyond lid-open,
+on-charger, indoor conditions.
+
 \subsection{Environment screen}
 \begin{figure}[t]\centering
 \maybefig{fig_calib}{\linewidth}
@@ -713,7 +743,7 @@ reservation ring collapses; and changing QoS policy reverses their ranking
 without revealing which cores ran them. Parent controls rule out one yielding
 policy as a remedy inside the CAS structure and show that FAA is not required
 for the ticket profile; the industrial cross-check then shows a busy-spinning
-ticket queue collapsing ${\sim}700\times$ where a yielding one improves ---
+ticket queue collapsing over $700\times$ where a yielding one improves ---
 the robustness is an interaction of coordination structure and wait policy,
 and capacity 64 restores the predicted reservation stall in both ticket
 implementations.
