@@ -237,7 +237,8 @@ ctest --test-dir build-asan --output-on-failure
   capacities, with and without scheduler yields.
 - Tests can't *prove* the absence of a race; sound reasoning (the proof above)
   plus a model checker (Relacy / CDSChecker / GenMC) get closest. See the source
-  comments and `learn/` for the full treatment.
+  comments and the correctness discussion in [the paper](paper/main.tex) for
+  the full treatment shipped with this repository.
 
 ---
 
@@ -260,13 +261,31 @@ libraries embody.
 
 ---
 
-## Deliberately not built
+## MPMC study and paper artifact
 
-- **Blocking variant** (consumer sleeps when empty) → condition variable or
-  futex/eventfd; note it is then no longer lock-free.
-- **MPMC** → bounded Vyukov queue with per-slot sequence numbers (needs CAS,
-  has to handle ABA; lock-free but not wait-free).
-- A byte-ring for I/O, huge pages.
+The repository now also contains an experimental MPMC comparison in
+[`include/mpmc/`](include/mpmc), driven by one process-per-trial harness. It is
+the artifact for *MPMC Queue Tradeoffs on an Apple M2 System: A Reproducible
+Characterization*, not an
+additional production library API. The measured arms are deliberately
+classified by their actual completion behavior:
+
+- Michael–Scott uses lock-free pointer operations with epoch-based reclamation.
+- The bounded Vyukov arm is a mutex-free, shared-cursor CAS-retry design.
+- FAA/ticket and CAS/ticket reserve positions without a mutex but can block on
+  completion of an earlier slot reservation; ticket acquisition alone does not
+  make the whole operation wait-free or lock-free.
+- A bounded `mutex` + `deque` arm is the blocking reference, and the SPSC queue
+  appears only at the valid 1:1 shape.
+
+See [ARTIFACT.md](ARTIFACT.md) for exact reproduction commands, dataset
+selection rules, provenance, and known exclusions. The paper source is
+[`paper/main.tex`](paper/main.tex), and the auditable claim-to-dataset mapping
+is [`paper/notes/claims.md`](paper/notes/claims.md).
+
+Remaining non-goals are a sleeping/blocking SPSC API (condition variable or
+futex/eventfd), a byte-oriented I/O ring, huge-page integration, and presenting
+the experimental MPMC implementations as drop-in production queues.
 
 ---
 
