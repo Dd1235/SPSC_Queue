@@ -24,11 +24,11 @@
 // consumer; a consumer exits on its first pill.
 //
 // macOS-specific axes for the paper:
-//   --qos {none,all-int,all-bg,prod-bg,cons-bg}: steers threads toward P-cores
-//     (USER_INTERACTIVE) or E-cores (BACKGROUND) via thread QoS -- macOS has no
-//     thread affinity; this is best-effort placement and logged as such.
+//   --qos {none,all-int,all-bg,prod-bg,cons-bg}: requests macOS scheduling
+//     policy classes. It neither controls nor observes P/E-core residency, so
+//     rows record the requested policy only.
 //   --oversubscribe F: multiplies both thread counts (ratio preserved) to test
-//     the progress-guarantee hypothesis (H1) under preemption.
+//     how each queue's reservation/completion structure responds to preemption.
 //   A spin-calibration loop (fixed work, timed) runs before the trial as a
 //   cheap frequency/thermal proxy, logged per row (fanless M2 methodology).
 #include "bench_common.hpp"
@@ -49,6 +49,8 @@
 
 #include <algorithm>
 #include <atomic>
+#include <cerrno>
+#include <cctype>
 #include <cinttypes>
 #include <cmath>
 #include <cstdint>
@@ -56,6 +58,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <ctime>
+#include <limits>
 #include <string>
 #include <thread>
 #include <vector>
@@ -162,14 +165,92 @@ struct Result {
     double elapsed = 0;
     double mean_ns = 0;
     std::uint64_t p50 = 0, p99 = 0, p999 = 0, mx = 0;
-    double fair_cov = 0;  // CoV of per-producer push counts (throughput mode)
+    // Historical CSV names retained for compatibility. These CoVs describe
+    // finite-window work balance, not starvation freedom or scheduler fairness.
+    double fair_cov = 0;  // per-producer completed-push count CoV
     std::uint64_t calib_ns = 0;
     double peak_rss_mb = 0;       // process peak RSS (H3: unbounded MS memory growth)
-    double cons_cov = 0;          // CoV of per-consumer pop counts (consumer fairness)
+    double cons_cov = 0;          // per-consumer completed-pop count CoV
     long vcsw = 0, ivcsw = 0;     // voluntary / involuntary context switches
     double retries_per_op = 0;    // stats build: queue-specific primary counter
     double secondary_per_op = 0;  // stats build: queue-specific secondary counter
 };
+
+[[noreturn]] void invalid_number(const char* flag, const char* value, const char* expected) {
+    std::fprintf(stderr, "invalid value for %s: '%s' (expected %s)\n", flag, value, expected);
+    std::exit(2);
+}
+
+int parse_int(const char* value, const char* flag, bool allowZero = false) {
+    errno = 0;
+    char* end = nullptr;
+    const long long parsed = std::strtoll(value, &end, 10);
+    if (errno == ERANGE || end == value || *end != '\0' ||
+        parsed > std::numeric_limits<int>::max() ||
+        (allowZero ? parsed < 0 : parsed <= 0))
+        invalid_number(flag, value,
+                       allowZero ? "a non-negative integer" : "a positive integer");
+    return static_cast<int>(parsed);
+}
+
+std::size_t parse_size(const char* value, const char* flag) {
+    const char* first = value;
+    while (std::isspace(static_cast<unsigned char>(*first))) ++first;
+    if (*first == '-') invalid_number(flag, value, "a positive integer");
+
+    errno = 0;
+    char* end = nullptr;
+    const unsigned long long parsed = std::strtoull(value, &end, 10);
+    if (errno == ERANGE || end == value || *end != '\0' || parsed == 0 ||
+        parsed > std::numeric_limits<std::size_t>::max())
+        invalid_number(flag, value, "a positive integer");
+    return static_cast<std::size_t>(parsed);
+}
+
+double parse_double(const char* value, const char* flag) {
+    errno = 0;
+    char* end = nullptr;
+    const double parsed = std::strtod(value, &end);
+    if (errno == ERANGE || end == value || *end != '\0' || !std::isfinite(parsed) ||
+        parsed <= 0)
+        invalid_number(flag, value, "a positive finite number");
+    return parsed;
+}
+
+int checked_thread_total(int base, int multiplier, const char* role) {
+    if (base > std::numeric_limits<int>::max() / multiplier) {
+        std::fprintf(stderr, "%s thread count overflows int (%d x %d)\n", role, base,
+                     multiplier);
+        std::exit(2);
+    }
+    return base * multiplier;
+}
+
+bool supported_queue(const std::string& queue) {
+    if (queue == "ms" || queue == "ms-fix" || queue == "ms-retry" ||
+        queue == "vyukov" || queue == "vyukov-b" || queue == "faa" ||
+        queue == "casticket" || queue == "mutex" || queue == "spsc")
+        return true;
+#ifdef SPSC_HAVE_MOODYCAMEL
+    if (queue == "moody") return true;
+#endif
+    return false;
+}
+
+bool supported_qos(const std::string& qos) {
+    return qos == "none" || qos == "all-int" || qos == "all-bg" || qos == "prod-bg" ||
+           qos == "cons-bg";
+}
+
+#ifdef __APPLE__
+void set_qos_checked(qos_class_t cls, const char* context) {
+    const int rc = pthread_set_qos_class_self_np(cls, 0);
+    if (rc != 0) {
+        std::fprintf(stderr, "failed to apply %s QoS: %s\n", context, std::strerror(rc));
+        std::abort();  // never emit a row whose requested policy was not applied
+    }
+}
+#endif
 
 double cov_of(const std::vector<std::uint64_t>& xs) {
     if (xs.empty()) return 0.0;
@@ -194,7 +275,7 @@ void apply_qos(const std::string& policy, bool isProducer) {
         cls = isProducer ? QOS_CLASS_USER_INTERACTIVE : QOS_CLASS_BACKGROUND;
     else
         return;  // "none"
-    pthread_set_qos_class_self_np(cls, 0);
+    set_qos_checked(cls, policy.c_str());
 #else
     (void)policy;
     (void)isProducer;
@@ -202,13 +283,13 @@ void apply_qos(const std::string& policy, bool isProducer) {
 }
 
 // Fixed dependent-work loop, timed: a cheap frequency proxy so the matrix
-// script can detect thermal drift between trials (fanless M2). Pinned to
-// USER_INTERACTIVE QoS so the probe measures P-core frequency, not scheduler
-// placement luck (matrix v1's 97-172 ms spread was placement-confounded; see
-// paper/notes/claims.md caveat C1).
+// script can detect thermal drift between trials (fanless M2). A fixed
+// USER_INTERACTIVE request reduces scheduler-policy variation but neither
+// guarantees nor observes core residency or frequency. Matrix v1's 97-172 ms
+// spread was policy/placement-confounded; see paper/notes/claims.md caveat C1.
 std::uint64_t spin_calibration() {
 #ifdef __APPLE__
-    pthread_set_qos_class_self_np(QOS_CLASS_USER_INTERACTIVE, 0);
+    set_qos_checked(QOS_CLASS_USER_INTERACTIVE, "calibration interactive");
 #endif
     volatile std::uint64_t acc = 1;
     const auto t0 = bench::Clock::now();
@@ -219,8 +300,8 @@ std::uint64_t spin_calibration() {
             .count());
 #ifdef __APPLE__
     // Workers inherit the spawning thread's QoS: restore DEFAULT so the probe's
-    // pin does not silently turn the "none" policy into all-interactive.
-    pthread_set_qos_class_self_np(QOS_CLASS_DEFAULT, 0);
+    // QoS bias does not silently turn the "none" policy into all-interactive.
+    set_qos_checked(QOS_CLASS_DEFAULT, "post-calibration default");
 #endif
     return ns;
 }
@@ -293,8 +374,8 @@ template <class Q> Result run_throughput(const Config& cfg) {
     Result r;
     r.ops = pops.load();
     r.elapsed = elapsed;
-    r.fair_cov = cov_of(pushed);  // producer fairness
-    r.cons_cov = cov_of(popped);  // consumer fairness (completes F5)
+    r.fair_cov = cov_of(pushed);  // finite-window producer work balance
+    r.cons_cov = cov_of(popped);  // finite-window consumer work balance
     if (r.ops > 0) {
         r.retries_per_op = static_cast<double>(q.stat_retries()) / static_cast<double>(r.ops);
         r.secondary_per_op =
@@ -314,6 +395,9 @@ template <class Q> Result run_latency(const Config& cfg) {
 
     std::vector<std::uint64_t> popped(static_cast<std::size_t>(C), 0);
     std::vector<std::vector<std::uint64_t>> samples(static_cast<std::size_t>(C));
+    // Reserve 1.5x an even consumer share as a hot-path allocation hint. A
+    // vector may still grow when dequeue work is imbalanced: every observation
+    // must be retained for unbiased tail statistics and exact accounting.
     for (auto& s : samples)
         s.reserve(
             static_cast<std::size_t>(std::min<double>(cfg.rate * cfg.seconds / C * 1.5, 4e6)));
@@ -332,7 +416,7 @@ template <class Q> Result run_latency(const Config& cfg) {
                 if (v == kPoison) break;
                 ++popped[static_cast<std::size_t>(c)];
                 const std::uint64_t nowv = now_ns();
-                if (mine.size() < mine.capacity()) mine.push_back(nowv - v);
+                mine.push_back(nowv - v);
             }
         });
     }
@@ -369,6 +453,19 @@ template <class Q> Result run_latency(const Config& cfg) {
     r.cons_cov = cov_of(popped);
     std::uint64_t total_pops = 0;
     for (auto v : popped) total_pops += v;
+    const std::uint64_t producerCount = static_cast<std::uint64_t>(P);
+    if (sends > std::numeric_limits<std::uint64_t>::max() / producerCount) {
+        std::fprintf(stderr, "latency expected-count overflow\n");
+        std::exit(3);
+    }
+    const std::uint64_t expected = sends * producerCount;
+    if (total_pops != expected || all.size() != total_pops) {
+        std::fprintf(stderr,
+                     "latency accounting mismatch: expected=%" PRIu64 ", popped=%" PRIu64
+                     ", retained=%zu\n",
+                     expected, total_pops, all.size());
+        std::exit(3);
+    }
     if (total_pops > 0) {
         r.retries_per_op =
             static_cast<double>(q.stat_retries()) / static_cast<double>(total_pops);
@@ -407,7 +504,7 @@ void write_csv(const Config& cfg, const Result& r) {
                         "secondary_per_op,calib_ns,peak_rss_mb,unix_time\n");
     std::fprintf(
         f,
-        "%s,%s,%d,%d,%d,%zu,%s,%.2f,%.0f,%d,%" PRIu64 ",%.4f,%.3f,%.1f,%" PRIu64 ",%" PRIu64
+        "%s,%s,%d,%d,%d,%zu,%s,%.17g,%.17g,%d,%" PRIu64 ",%.4f,%.3f,%.1f,%" PRIu64 ",%" PRIu64
         ",%" PRIu64 ",%" PRIu64 ",%.4f,%.4f,%ld,%ld,%.4f,%.4f,%" PRIu64 ",%.1f,%ld\n",
         cfg.queue.c_str(), cfg.mode.c_str(), cfg.producers, cfg.consumers, cfg.oversubscribe,
         cfg.capacity, cfg.qos.c_str(), cfg.seconds, cfg.rate, cfg.trial, r.ops, r.elapsed,
@@ -432,23 +529,23 @@ int main(int argc, char** argv) {
         if (!std::strcmp(argv[i], "--queue"))
             cfg.queue = next("--queue");
         else if (!std::strcmp(argv[i], "--producers"))
-            cfg.producers = std::atoi(next("--producers"));
+            cfg.producers = parse_int(next("--producers"), "--producers");
         else if (!std::strcmp(argv[i], "--consumers"))
-            cfg.consumers = std::atoi(next("--consumers"));
+            cfg.consumers = parse_int(next("--consumers"), "--consumers");
         else if (!std::strcmp(argv[i], "--capacity"))
-            cfg.capacity = static_cast<std::size_t>(std::atoll(next("--capacity")));
+            cfg.capacity = parse_size(next("--capacity"), "--capacity");
         else if (!std::strcmp(argv[i], "--mode"))
             cfg.mode = next("--mode");
         else if (!std::strcmp(argv[i], "--seconds"))
-            cfg.seconds = std::atof(next("--seconds"));
+            cfg.seconds = parse_double(next("--seconds"), "--seconds");
         else if (!std::strcmp(argv[i], "--rate"))
-            cfg.rate = std::atof(next("--rate"));
+            cfg.rate = parse_double(next("--rate"), "--rate");
         else if (!std::strcmp(argv[i], "--qos"))
             cfg.qos = next("--qos");
         else if (!std::strcmp(argv[i], "--oversubscribe"))
-            cfg.oversubscribe = std::atoi(next("--oversubscribe"));
+            cfg.oversubscribe = parse_int(next("--oversubscribe"), "--oversubscribe");
         else if (!std::strcmp(argv[i], "--trial"))
-            cfg.trial = std::atoi(next("--trial"));
+            cfg.trial = parse_int(next("--trial"), "--trial", true);
         else if (!std::strcmp(argv[i], "--csv"))
             cfg.csv = next("--csv");
         else {
@@ -456,10 +553,53 @@ int main(int argc, char** argv) {
             return 2;
         }
     }
-    if (cfg.queue == "spsc" &&
-        (cfg.producers * cfg.oversubscribe != 1 || cfg.consumers * cfg.oversubscribe != 1)) {
+
+    if (!supported_queue(cfg.queue)) {
+        std::fprintf(stderr, "unknown queue '%s'\n", cfg.queue.c_str());
+        return 2;
+    }
+    if (cfg.mode != "throughput" && cfg.mode != "latency") {
+        std::fprintf(stderr, "unknown mode '%s' (expected throughput or latency)\n",
+                     cfg.mode.c_str());
+        return 2;
+    }
+    if (!supported_qos(cfg.qos)) {
+        std::fprintf(stderr, "unknown qos '%s'\n", cfg.qos.c_str());
+        return 2;
+    }
+
+    const int actualProducers =
+        checked_thread_total(cfg.producers, cfg.oversubscribe, "producer");
+    const int actualConsumers =
+        checked_thread_total(cfg.consumers, cfg.oversubscribe, "consumer");
+    if (cfg.queue == "spsc" && (actualProducers != 1 || actualConsumers != 1)) {
         std::fprintf(stderr, "spsc requires exactly 1 producer and 1 consumer\n");
         return 2;
+    }
+    const bool isMs = cfg.queue == "ms" || cfg.queue == "ms-fix" || cfg.queue == "ms-retry";
+    const std::size_t actualWorkers = static_cast<std::size_t>(actualProducers) +
+                                      static_cast<std::size_t>(actualConsumers);
+    if (isMs && actualWorkers > mpmc::ebr::kMaxThreads) {
+        std::fprintf(stderr, "MS queues support at most %zu worker threads (requested %zu)\n",
+                     mpmc::ebr::kMaxThreads, actualWorkers);
+        return 2;
+    }
+    if (cfg.mode == "latency") {
+        const double perProducerRate = cfg.rate / static_cast<double>(actualProducers);
+        const double periodNs = 1e9 / perProducerRate;
+        const double sends = cfg.seconds * perProducerRate;
+        const double totalSends = sends * static_cast<double>(actualProducers);
+        const double u64Limit =
+            std::ldexp(1.0, std::numeric_limits<std::uint64_t>::digits);
+        if (!std::isfinite(periodNs) || periodNs >= u64Limit || periodNs < 1.0 ||
+            !std::isfinite(sends) || sends >= u64Limit || sends < 1.0 ||
+            !std::isfinite(totalSends) || totalSends >= u64Limit) {
+            std::fprintf(stderr,
+                         "latency rate/seconds produce an unsupported schedule "
+                         "(period %.3g ns, sends/producer %.3g)\n",
+                         periodNs, sends);
+            return 2;
+        }
     }
 
     const std::uint64_t calib = spin_calibration();
@@ -490,10 +630,8 @@ int main(int argc, char** argv) {
     else if (cfg.queue == "moody")
         r = dispatch_mode<MoodyAdapter>(cfg);
 #endif
-    else {
-        std::fprintf(stderr, "unknown queue '%s'\n", cfg.queue.c_str());
-        return 2;
-    }
+    else
+        std::abort();  // validated above; keeps dispatch exhaustive
     r.calib_ns = calib;
     r.peak_rss_mb = peak_rss_mb();
     rusage ru1{};

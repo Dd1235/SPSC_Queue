@@ -4,9 +4,11 @@
 //
 // Note on CPU pinning: the spec calls for pinning producer/consumer to two
 // cores. macOS does not expose usable thread affinity on Apple silicon (the
-// affinity API is a hint the scheduler ignores), so we do not pin here; runs
-// are repeated and the best is reported to suppress scheduler noise. On Linux
-// you would pin with pthread_setaffinity_np.
+// affinity API is a hint the scheduler ignores), so we do not pin here. The
+// standalone microbenchmarks using throughput_mops report their best in-process
+// repetition. The paper's bench_mpmc protocol instead records isolated process
+// trials and reports post-warmup medians. On Linux, affinity could be added with
+// pthread_setaffinity_np.
 #pragma once
 
 #include <algorithm>
