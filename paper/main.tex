@@ -119,16 +119,32 @@ per-cell sequence coordination. Its author explicitly does not claim formal
 lock freedom: a reservation can be visible before its cell is published.
 Fetch-and-add designs exploit FAA's
 always-succeeds property, from the LMAX Disruptor's industrial sequencer
-\cite{thompson2011} to LCRQ \cite{morrison2013} and SCQ \cite{nikolaev2019};
-flat combining \cite{hendler2010} reframes the contention question entirely.
-\texttt{moodycamel::ConcurrentQueue} \cite{moodycamel} represents deployed
-industrial practice.
+\cite{thompson2011} to LCRQ \cite{morrison2013}, SCQ \cite{nikolaev2019}, and
+the wait-free bounded-memory wCQ \cite{nikolaev2022wcq}; BBQ
+\cite{wang2022bbq} revisits bounded-queue design block-wise with explicit
+attention to deployment regimes; flat combining \cite{hendler2010} reframes
+the contention question entirely. \texttt{moodycamel::ConcurrentQueue}
+\cite{moodycamel} and \texttt{rigtorp::MPMCQueue} \cite{rigtorp} represent
+deployed industrial practice.
+
+\textbf{Preemption and synchronization.} The interaction of multiprogramming
+with non-blocking algorithms is a 1990s question: scheduler-conscious
+synchronization \cite{kontothanassis1997} and Michael and Scott's
+preemption-safe locking study \cite{michael1998preemption} found non-blocking
+algorithms \emph{more} robust than locks under multiprogramming on the SMPs
+of that era. Our H1 was essentially their conclusion restated as a
+prediction; Sec.~\ref{sec:oversub} shows that on this platform the outcome
+splits along coordination structure rather than blocking versus non-blocking.
 
 \textbf{Characterization studies.} Our genre follows David et al.'s
 cross-platform synchronization study \cite{david2013}, which showed
 synchronization conclusions to be strongly hardware-dependent, and Guiroux et
 al.\ \cite{guiroux2016}, who showed lock rankings shift with workload and
-machine. We test the same general lesson in one client-system case study.
+machine. Relative to both: they varied server hardware under pinned threads;
+we hold one \emph{client} system fixed and vary the scheduling regime
+(placement policy, preemption pressure, offered load) that client software
+cannot control. The two axes are complementary, and our single-system scope
+is the price of the second axis.
 
 \textbf{Asymmetric multicores.} Single-ISA heterogeneous processors were
 studied for energy scheduling well before they reached the desktop
@@ -228,7 +244,10 @@ interrupted round~8 remains in the raw file but is excluded. The v3 control
 and h3 reclamation matrices likewise use one warmup plus seven measured rounds,
 apart from explicitly reported timeouts. The earlier v1 matrix (one warmup plus
 four measured rounds) is a replication check. These are descriptive statistics;
-we do not report inferential significance tests.
+we do not report inferential significance tests, but headline effect medians
+carry 95\% bootstrap percentile intervals (20{,}000 resamples, fixed seed;
+\texttt{scripts/bootstrap\_ci.py}). At seven kept rounds these intervals are
+coarse by construction; we quote them so the reader can see that coarseness.
 
 \textbf{Latency.} Producers are staggered and paced at a total offered load of
 1\,M message/s. Payloads carry the \emph{scheduled} send time, so
@@ -291,6 +310,7 @@ is legal. Thus neither the 1:1 ranking nor the mutex win is universal even
 within this matrix.
 
 \subsection{Oversubscription: CAS reservation versus ticket/turn}
+\label{sec:oversub}
 \begin{figure}[t]\centering
 \maybefig[v3]{fig_oversubscription}{0.9\linewidth}
 \caption{Throughput at 4P:4C, capacity 1024, as both thread counts are
@@ -313,8 +333,10 @@ review matters: Vyukov also reserves before publishing and is not formally
 lock-free, so the experiment does not invert two formal progress classes. It
 instead contrasts two reservation structures. Across three independently run
 matrices, capacity-1024 FAA throughput rises 77--94\% from $\times1$ to
-$\times4$ (v3: 16.5$\,\to\,$29.7 Mops/s), while Vyukov falls about 80\%
-(7.9$\,\to\,$1.7); the mutex falls 24\% and MS 15\%. In complete-sample
+$\times4$ (v3: 16.5$\,\to\,$29.7 Mops/s; $\times4/\times1$ ratio CI95
+[1.75, 1.88]), while Vyukov falls about 80\% (7.9$\,\to\,$1.7; ratio CI95
+[0.19, 0.23]); the mutex falls 24\% and MS 15\%. The two intervals sit on
+opposite sides of 1 with a wide gap. In complete-sample
 latency trials, CAS/ticket and FAA/ticket have 14.1 and 14.2\,ms p99.9. The next
 best arm is the mutex at 69.5\,ms; Vyukov, Vyukov-backoff, MS, and moodycamel
 range from 70.6 to 107.5\,ms. The ticket result is therefore about $5\times$
@@ -403,8 +425,9 @@ policies; historical call success and actual core residency were not recorded.}
 \label{fig:qos}
 \end{figure}
 In canonical v2, requesting background rather than interactive QoS for all workers
-retains 88\% of FAA throughput (16.7$\,\to\,$14.7 Mops/s), 19\% of the mutex
-(19.1$\,\to\,$3.6), and 6\% of Vyukov (8.1$\,\to\,$0.46). Thus background QoS
+retains 88\% of FAA throughput (16.7$\,\to\,$14.7 Mops/s; CI95 [83, 95]\%),
+19\% of the mutex (19.1$\,\to\,$3.6; [15, 20]\%), and 6\% of Vyukov
+(8.1$\,\to\,$0.46; [5, 6]\%). Thus background QoS
 reverses the interactive-policy mutex/FAA order; FAA is about $4\times$ the
 mutex and $32\times$ Vyukov under the background policy. These effects are
 associated with the requested scheduler policies, not observations of the
@@ -452,8 +475,9 @@ freed. Its decisive code-path difference is the stuck-epoch case, where no
 entry expires and it returns in $O(1)$ instead of scanning all limbo entries.
 
 At 1:7 and 2:6, prefix mode reduces median peak RSS by 76--82\%
-($626\!\to\!153$ and $536\!\to\!97$\,MB) and raises end-to-end throughput by
-76\% and 28\% (1:7: $5.4\!\to\!9.4$\,Mops/s). At 4:4, prefix mode cuts RSS
+($626\!\to\!153$ and $536\!\to\!97$\,MB; 1:7 legacy/fix ratio CI95
+[2.6, 4.6]$\times$) and raises end-to-end throughput by
+76\% and 28\% (1:7: $5.4\!\to\!9.4$\,Mops/s; ratio CI95 [1.55, 1.86]). At 4:4, prefix mode cuts RSS
 52\% but reduces throughput 13\%. Absolute legacy RSS differs between v2 and
 h3 (742 vs 626\,MB at 1:7), so every percentage above is a within-h3
 comparison.
