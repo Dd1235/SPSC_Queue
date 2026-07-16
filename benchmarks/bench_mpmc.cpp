@@ -41,6 +41,16 @@
 #include <concurrentqueue.h>
 #endif
 
+#ifdef SPSC_HAVE_RIGTORP_MPMC
+#include <rigtorp/MPMCQueue.h>
+#endif
+
+#ifdef SPSC_HAVE_XENIUM
+#include <xenium/michael_scott_queue.hpp>
+#include <xenium/policy.hpp>
+#include <xenium/reclamation/hazard_pointer.hpp>
+#endif
+
 #ifdef __APPLE__
 #include <pthread/qos.h>
 #endif
@@ -147,6 +157,45 @@ struct MoodyAdapter {
 };
 #endif
 
+#ifdef SPSC_HAVE_RIGTORP_MPMC
+// Industrial ticket/turn reference: rigtorp::MPMCQueue claims a position with
+// fetch_add and waits on a per-slot turn counter -- the same coordination
+// structure as our FAAQueue, engineered independently. push/pop block, so the
+// adapter reports success unconditionally (poison protocol makes this safe).
+struct RigtorpAdapter {
+    std::uint64_t stat_retries() const { return 0; }
+    std::uint64_t stat_secondary() const { return 0; }
+    rigtorp::MPMCQueue<std::uint64_t> q;
+    explicit RigtorpAdapter(std::size_t cap) : q(cap) {}
+    bool try_push(std::uint64_t v) {
+        q.push(v);
+        return true;
+    }
+    bool try_pop(std::uint64_t& v) {
+        q.pop(v);
+        return true;
+    }
+};
+#endif
+
+#ifdef SPSC_HAVE_XENIUM
+// Reclamation-scheme cross-check for the F8 finding: the same Michael-Scott
+// algorithm under HAZARD-POINTER reclamation (xenium) instead of our EBR.
+// Unbounded; the capacity argument is ignored, as for MSAdapter's queue.
+struct XeniumHPAdapter {
+    using Reclaimer = xenium::reclamation::hazard_pointer<>;
+    std::uint64_t stat_retries() const { return 0; }
+    std::uint64_t stat_secondary() const { return 0; }
+    xenium::michael_scott_queue<std::uint64_t, xenium::policy::reclaimer<Reclaimer>> q;
+    explicit XeniumHPAdapter(std::size_t) {}
+    bool try_push(std::uint64_t v) {
+        q.push(v);
+        return true;
+    }
+    bool try_pop(std::uint64_t& v) { return q.try_pop(v); }
+};
+#endif
+
 // ---------------- config / CSV ----------------
 
 struct Config {
@@ -238,6 +287,12 @@ bool supported_queue(const std::string& queue) {
         return true;
 #ifdef SPSC_HAVE_MOODYCAMEL
     if (queue == "moody") return true;
+#endif
+#ifdef SPSC_HAVE_RIGTORP_MPMC
+    if (queue == "rigtorp") return true;
+#endif
+#ifdef SPSC_HAVE_XENIUM
+    if (queue == "xenium") return true;
 #endif
     return false;
 }
@@ -637,6 +692,14 @@ int main(int argc, char** argv) {
 #ifdef SPSC_HAVE_MOODYCAMEL
     else if (cfg.queue == "moody")
         r = dispatch_mode<MoodyAdapter>(cfg);
+#endif
+#ifdef SPSC_HAVE_RIGTORP_MPMC
+    else if (cfg.queue == "rigtorp")
+        r = dispatch_mode<RigtorpAdapter>(cfg);
+#endif
+#ifdef SPSC_HAVE_XENIUM
+    else if (cfg.queue == "xenium")
+        r = dispatch_mode<XeniumHPAdapter>(cfg);
 #endif
     else
         std::abort();  // validated above; keeps dispatch exhaustive

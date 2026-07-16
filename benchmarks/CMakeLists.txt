@@ -64,7 +64,14 @@ if(SPSC_BENCH_THIRDPARTY)
     FetchContent_Declare(moodycamel_cq
         GIT_REPOSITORY https://github.com/cameron314/concurrentqueue.git
         GIT_TAG        6dd38b8a1dbaa7863aa907045f32308a56a6ff5d)
-    FetchContent_MakeAvailable(rigtorp_spsc moodycamel_rwq moodycamel_cq)
+    FetchContent_Declare(rigtorp_mpmc
+        GIT_REPOSITORY https://github.com/rigtorp/MPMCQueue.git
+        GIT_TAG        11ffb3cd77998cba83c20d2853720be1625cd719) # v1.0
+    FetchContent_Declare(xenium
+        GIT_REPOSITORY https://github.com/mpoeter/xenium.git
+        GIT_TAG        1c449ae953ce2a440b0d16c5ed1181d2754860ab) # HEAD 2026-07
+    FetchContent_MakeAvailable(rigtorp_spsc moodycamel_rwq moodycamel_cq
+                               rigtorp_mpmc xenium)
 
     add_bench(bench_vs_libs)
     # Both are header-only; include their source dirs directly so we do not
@@ -73,9 +80,16 @@ if(SPSC_BENCH_THIRDPARTY)
         ${rigtorp_spsc_SOURCE_DIR}/include
         ${moodycamel_rwq_SOURCE_DIR})
 
-    # bench_mpmc (and its stats twin) gain the moodycamel reference arm.
-    target_compile_definitions(bench_mpmc PRIVATE SPSC_HAVE_MOODYCAMEL)
-    target_include_directories(bench_mpmc PRIVATE ${moodycamel_cq_SOURCE_DIR})
-    target_compile_definitions(bench_mpmc_stats PRIVATE SPSC_HAVE_MOODYCAMEL)
-    target_include_directories(bench_mpmc_stats PRIVATE ${moodycamel_cq_SOURCE_DIR})
+    # bench_mpmc (and its stats twin) gain the industrial reference arms:
+    # moodycamel CQ, rigtorp's ticket/turn MPMCQueue, and xenium's
+    # Michael-Scott queue with hazard-pointer reclamation (the
+    # reclamation-scheme cross-check for F8).
+    foreach(tgt bench_mpmc bench_mpmc_stats)
+        target_compile_definitions(${tgt} PRIVATE
+            SPSC_HAVE_MOODYCAMEL SPSC_HAVE_RIGTORP_MPMC SPSC_HAVE_XENIUM)
+        target_include_directories(${tgt} PRIVATE
+            ${moodycamel_cq_SOURCE_DIR}
+            ${rigtorp_mpmc_SOURCE_DIR}/include
+            ${xenium_SOURCE_DIR})
+    endforeach()
 endif()

@@ -34,8 +34,9 @@ FOCUS_QUEUES = {
     "h3s": ["ms", "ms-fix", "ms-retry"],
     "load": ["ms", "vyukov", "faa", "casticket", "mutex", "moody"],
     "load2": ["ms", "vyukov", "faa", "casticket", "mutex", "moody"],
+    "ind": ["rigtorp", "xenium", "faa", "ms", "vyukov", "mutex", "moody"],
 }
-KNOWN_QUEUES = set(DEFAULT_QUEUES) | {"ms-fix", "ms-retry", "spsc"}
+KNOWN_QUEUES = set(DEFAULT_QUEUES) | {"ms-fix", "ms-retry", "spsc", "rigtorp", "xenium"}
 CSV_KEY_COLUMNS = [
     "queue", "mode", "producers", "consumers", "oversubscribe", "capacity",
     "qos", "seconds", "rate", "trial",
@@ -71,6 +72,23 @@ def shapes(smoke: bool, focus: str = ""):
         for rate in (6_000_000, 8_000_000, 12_000_000, 16_000_000, 24_000_000):
             yield dict(mode="latency", producers=4, consumers=4, oversubscribe=1,
                        qos="none", rate=rate)
+        return
+    if focus == "ind":
+        # Industrial cross-check: rigtorp's ticket/turn MPMCQueue (tests the
+        # slot-discipline claim with independent engineering) and xenium's
+        # Michael-Scott + hazard pointers (tests whether the F8 memory
+        # pathology is EBR-specific). Shapes reuse the study's key axes.
+        for pc in ((1, 1), (4, 4), (2, 6), (1, 7)):
+            yield dict(mode="throughput", producers=pc[0], consumers=pc[1],
+                       oversubscribe=1, qos="none")
+        for over in (2, 4):
+            yield dict(mode="throughput", producers=4, consumers=4,
+                       oversubscribe=over, qos="none")
+        yield dict(mode="throughput", producers=4, consumers=4,
+                   oversubscribe=4, qos="none", capacity=64)
+        for over in (1, 4):
+            yield dict(mode="latency", producers=4, consumers=4,
+                       oversubscribe=over, qos="none", rate=1_000_000)
         return
     if focus == "h1":
         # The F1-attribution subset: oversubscription sweep + capacity control +
@@ -281,7 +299,8 @@ def main():
     ap.add_argument("--queues",
                     help="comma-separated queue list (focus profiles have tailored defaults)")
     ap.add_argument("--smoke", action="store_true", help="tiny matrix for pipeline testing")
-    ap.add_argument("--focus", default="", choices=["", "h1", "h3", "h3s", "load", "load2"],
+    ap.add_argument("--focus", default="",
+                    choices=["", "h1", "h3", "h3s", "load", "load2", "ind"],
                     help="named shape subset (h1/h3/load)")
     output_mode = ap.add_mutually_exclusive_group()
     output_mode.add_argument("--overwrite", action="store_true",
