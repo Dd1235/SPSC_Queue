@@ -266,6 +266,43 @@ bounds order carryover. Median of last 5 soaks vs median of first 3 (cold):
   trials (external interference); last-5 medians are robust to them.
   Ambient/charger uncontrolled (lid open, on charger, indoor ambient).
 
+## P — observed clusters and energy (matrix_power, powermetrics, 6 kept rounds; 2026-07-17)
+
+Protocol: run_power.py brackets each 2 s 4:4 trial with a powermetrics
+sampler (250 ms, cpu_power); medians below. Machine-wide instrument: cluster
+residency/power include the sampler and system activity — an attribution
+limit, stated wherever quoted.
+
+| policy | queue | Mops/s | E/P resid % | P-freq MHz | pkg mW | nJ/op |
+|---|---|---|---|---|---|---|
+| none | faa | 17.1 | 62/66 | 1606 | 1721 | **99.7** |
+| none | mutex | 17.4 | 62/67 | 1726 | 1939 | 111.5 |
+| none | vyukov | 8.1 | 63/68 | 1716 | 1997 | 246.2 |
+| none | ms | 6.8 | 63/67 | 1662 | 3033 | 441.2 |
+| all-bg | faa | 16.5 | 67/62 | 1454 | **837** | **52.6** |
+| all-bg | vyukov | 0.55 | 64/63 | 1531 | 896 | **1616.4** |
+
+- **P1 — REFUTED AS STATED, reframed.** Background QoS does NOT empty the
+  P-cluster: machine-wide residency stays ~60–67% on BOTH clusters under
+  all-bg. What changes is frequency (P −9–20% for 4/5 designs; ms flat,
+  E −13%) and package power (roughly halves for every design,
+  1.7–3.0 W → 0.84–1.2 W). The F2 ranking reversal is at
+  least partly a frequency/power-budget effect; per-thread placement remains
+  unobserved. The paper's refusal to call F2 an "E-core result" is now
+  measured, not just cautious.
+- **P2 — energy per op is a decisive axis.** Default policy: faa 100 nJ/op,
+  mutex 112, vyukov 246, moody 292, ms 441. Under all-bg, faa improves
+  99.7→52.6 nJ/op (−47%) at −4% throughput — the only design to gain while
+  keeping throughput; ms also edges down (441→392, −11%, at −52%
+  throughput); vyukov worsens 6.6× (246→1616); mutex 2.4×; moody +10%.
+- **P3 — power ranking mirrors the thermal soak.** ms is the power hog
+  (3.0 W default; highest at every policy); faa the lightest (1.7 W).
+  Third instrument agreeing with T (probe) and F10 (wait policy): spinning
+  and reclamation churn burn the budget; yielding hands it back.
+- Caveats: package-level attribution (otherwise-idle assumption; sampler
+  included), cluster-level machine-wide residency, k=6, nJ/op uses bench
+  elapsed (includes drain).
+
 **Phase F remaining:** (1) ~~results prose~~ DONE 2026-07-07 (main.tex fully drafted from v2); (2) ARTIFACT.md; (3) venue deadline check; (4) human rewrite pass; (5) optional: fairness figure for F5, cross-machine invitation via artifact.
 
 ### Appendix: QoS table (throughput Mops/s, 4P:4C, ×1, matrix v1 medians)

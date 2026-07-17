@@ -428,6 +428,52 @@ def run_checks():
             .throughput_mops.median() for q in ('faa', 'vyukov', 'ms', 'mutex')})),
        committed_tol=0, replication_tol=0)
 
+    # -- P: observed clusters + energy (matrix_power; powermetrics-bracketed) --
+    def pw(value, qos):
+        return med('matrix_power', value=value, mode='throughput', producers=4,
+                   consumers=4, oversubscribe=1, capacity=1024, qos=qos)
+
+    nj_none = pw('nj_per_op', 'none')
+    nj_bg = pw('nj_per_op', 'all-bg')
+    ck('P2 faa energy at default policy=99.7 nJ/op', 99.7, nj_none['faa'])
+    ck('P2 ms energy at default policy=441 nJ/op', 441, nj_none['ms'],
+       replication_tol=0.25)
+    ck('P2 energy ordering at default: faa < mutex < vyukov < moody < ms', 1,
+       float(nj_none['faa'] < nj_none['mutex'] < nj_none['vyukov'] <
+             nj_none['moody'] < nj_none['ms']),
+       committed_tol=0, replication_tol=0)
+    tp_none = pw('throughput_mops', 'none')
+    tp_bg = pw('throughput_mops', 'all-bg')
+    ck('P2 only faa improves energy while keeping >=95% throughput', 1,
+       float(all((nj_bg[q] < nj_none[q] and tp_bg[q] >= 0.95 * tp_none[q])
+                 == (q == 'faa')
+                 for q in ('faa', 'vyukov', 'ms', 'moody', 'mutex'))),
+       committed_tol=0, replication_tol=0)
+    ck('P2 ms energy edges down under all-bg (-11%) at half throughput', 1,
+       float(nj_bg['ms'] < nj_none['ms'] and tp_bg['ms'] < 0.6 * tp_none['ms']),
+       committed_tol=0, replication_tol=0)
+    ck('P2 faa all-bg energy=52.6 nJ/op (-47%)', 52.6, nj_bg['faa'],
+       replication_tol=0.25)
+    ck('P2 vyukov all-bg energy worsens 6.6x', 6.6,
+       nj_bg['vyukov'] / nj_none['vyukov'], replication_tol=0.50)
+    mw_none = pw('cpu_mw', 'none')
+    mw_bg = pw('cpu_mw', 'all-bg')
+    ck('P3 package power roughly halves under all-bg (every design)', 1,
+       float(all(mw_bg[q] < 0.65 * mw_none[q] for q in mw_none.index)),
+       committed_tol=0, replication_tol=0)
+    ck('P3 ms is the package-power maximum at default (3.0 W)', 3033,
+       mw_none['ms'], committed_tol=0.02, replication_tol=0.30)
+    pres_bg = pw('p_resid', 'all-bg')
+    ck('P1 all-bg does NOT empty the P-cluster (machine-wide resid >= 50%)', 1,
+       float(all(pres_bg[q] >= 50 for q in pres_bg.index)),
+       committed_tol=0, replication_tol=0)
+    pfreq = {qos: pw('p_freq', qos) for qos in ('none', 'all-bg')}
+    ck('P1 all-bg cuts P-cluster active frequency (4/5 designs; ms flat)', 1,
+       float(sum(pfreq['all-bg'][q] < pfreq['none'][q]
+                 for q in pres_bg.index) == 4 and
+             abs(pfreq['all-bg']['ms'] / pfreq['none']['ms'] - 1) < 0.05),
+       committed_tol=0, replication_tol=0)
+
     calib_rows = dataset('matrix_v2')
     calib = calib_rows[calib_rows.trial > 0].groupby('queue').calib_ns.median()
     ck('v2 queue-wise calibration spread=1.6%', 1.6,
