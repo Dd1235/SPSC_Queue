@@ -508,6 +508,47 @@ messages, while Vyukov, mutex, and moodycamel fell to 0.092, 0.174, and
 median/IQR summary therefore describes the central policy response, not
 round-level reliability under background scheduling.
 
+\subsection{Observed clusters and energy per operation}
+\label{sec:energy}
+\begin{figure}[t]\centering
+\maybefig[power]{fig_energy}{\linewidth}
+\caption{Energy per completed operation (log) and package CPU power by
+requested QoS policy (matrix power: six measured rounds bracketed by
+\texttt{powermetrics} sampling). Power is machine-wide under an
+otherwise-idle assumption.}
+\label{fig:energy}
+\end{figure}
+A dedicated dataset brackets each 4:4 trial with a \texttt{powermetrics}
+sampler, adding cluster residency, cluster frequency, package power, and
+energy per completed operation (Fig.~\ref{fig:energy}). Two results.
+
+First, the sampler \emph{disconfirms} the naive reading of the QoS effect:
+under the all-background policy, machine-wide HW-active residency remains
+60--67\% on \emph{both} clusters. What changes is frequency --- the
+P-cluster's active frequency drops 9--20\% for four of five designs (MS is
+flat) and the E-cluster's about 13\% --- and package power, which roughly
+halves for every design (1.7--3.0\,W to 0.84--1.2\,W). The
+policy reversal of Fig.~\ref{fig:qos} is therefore at least partly a
+frequency/power-budget response, not pure core migration; per-thread
+placement remains unobserved, and cluster residency is machine-wide
+(it includes the sampler and system activity). The refusal to label F2 an
+``E-core result'' is now a measurement, not only a caution.
+
+Second, energy per operation separates the designs more decisively than
+throughput. At default policy the ticket queue completes an operation for
+99.7\,nJ, the mutex 111.5, Vyukov 246, moodycamel 292, and MS+EBR 441.
+Under the background policy the ticket queue's energy improves 99.7 to
+52.6\,nJ/op ($-47\%$) at $-4\%$ throughput --- the only design to gain
+while keeping its throughput --- MS also edges down ($-11\%$, but at half
+the throughput), while Vyukov's worsens $6.6\times$ (246 to 1616\,nJ/op)
+because its throughput collapses faster than its power. MS+EBR is the package-power
+maximum at every policy (3.0\,W at default). This is the third instrument to
+report the same physics as the thermal soak (Sec.~\ref{sec:thermal}) and the
+wait-policy cross-check (Sec.~\ref{sec:industrial}): spinning, retrying, and
+reclamation churn burn a passive power budget; yielding returns it. On
+battery-powered clients, joules per message is arguably the deployment
+currency, and it ranks the designs more sharply than makespan does.
+
 \subsection{Process memory as an unbounded-implementation failure mode}
 \label{sec:mem}
 The MS queue never reports full. Over the full trial (two-second producer
@@ -701,9 +742,12 @@ in future datasets.
 \textbf{External and construct validity.} This is one 8\,GB M2 Air, OS, and
 compiler; it establishes no client-wide or cross-architecture ranking. QoS
 class is not core placement, and oversubscription is only a preemption proxy.
-We lack scheduler traces, residency, frequency, power, temperature, and cache-
-coherence counters. Accordingly, explanations based on scheduling or shared-
-cursor traffic are hypotheses consistent with controls and diagnostics.
+The power dataset adds machine-wide cluster residency, cluster frequency, and
+package power for one shape (Sec.~\ref{sec:energy}), but per-thread
+residency, scheduler traces, temperature, and cache-coherence counters remain
+unavailable, and the energy attribution assumes an otherwise-idle machine.
+Accordingly, explanations based on scheduling or shared-cursor traffic are
+hypotheses consistent with controls and diagnostics.
 
 \textbf{Measurement validity.} Queue order is fixed, workers have no start
 barrier, and the throughput timer starts before producers are launched
