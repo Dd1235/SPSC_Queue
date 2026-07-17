@@ -479,7 +479,54 @@ def fig_industrial(df, outdir, tag):
     plt.close(fig)
 
 
+def fig_energy(df, outdir, tag):
+    """Observed energy per operation and package power by QoS policy
+    (matrix_power: bench rows joined with powermetrics samples). Cluster
+    residency/frequency findings are quoted in prose; power is machine-wide
+    (otherwise-idle assumption documented in the paper)."""
+    d = df[(df["mode"] == "throughput") & (df.trial > 0)].copy()
+    policies = [p for p in ("none", "all-int", "all-bg") if p in set(d.qos)]
+    fig, axes = plt.subplots(1, 2, figsize=(6.8, 2.6))
+    for ax, col, ylabel, logy in (
+            (axes[0], "nj_per_op", "energy (nJ/op, log)", True),
+            (axes[1], "cpu_mw", "package CPU power (mW)", False)):
+        stats = d.groupby(["qos", "queue"], observed=True)[col].agg(
+            median="median",
+            q1=lambda values: values.quantile(0.25),
+            q3=lambda values: values.quantile(0.75),
+        ).reset_index()
+        qs = [q for q in ORDER if q in set(stats.queue)]
+        width = min(0.8 / max(len(qs), 1), 0.18)
+        for i, q in enumerate(qs):
+            rows = stats[stats.queue == q].set_index("qos")
+            xs, ys, lo, hi = [], [], [], []
+            for j, pol in enumerate(policies):
+                if pol in rows.index:
+                    row = rows.loc[pol]
+                    xs.append(j + (i - (len(qs) - 1) / 2) * width)
+                    ys.append(float(row["median"]))
+                    lo.append(float(row["median"]) - float(row["q1"]))
+                    hi.append(float(row["q3"]) - float(row["median"]))
+            ax.bar(xs, ys, width * 0.9, color=COLOR[q],
+                   label=LABEL[q] if col == "nj_per_op" else None,
+                   edgecolor="white", linewidth=0.6, hatch=HATCH.get(q))
+            ax.errorbar(xs, ys, yerr=[lo, hi], fmt="none", ecolor="#444",
+                        elinewidth=0.7, capsize=1.5)
+        ax.set_xticks(range(len(policies)))
+        ax.set_xticklabels(policies)
+        ax.set_xlabel("requested QoS policy (4P:4C, cap 1024)")
+        ax.set_ylabel(ylabel)
+        if logy:
+            ax.set_yscale("log")
+    axes[0].legend(fontsize=6, frameon=False)
+    fig.tight_layout()
+    for ext in ("pdf", "png"):
+        fig.savefig(outdir / f"fig_energy_{tag}.{ext}")
+    plt.close(fig)
+
+
 def fig_loadcurve(df, outdir, tag):
+
 
     """Optional offered-rate profile: schedule-to-dequeue p99 latency."""
     base = df[(df["mode"] == "latency") & (df.trial > 0) &
@@ -646,6 +693,8 @@ def main():
     emit("fig_loadcurve", fig_loadcurve, has_load_focus)
     emit("fig_industrial", fig_industrial,
          bool(set(df.queue) & {"rigtorp", "xenium"}))
+    emit("fig_energy", fig_energy,
+         "nj_per_op" in df.columns and df["nj_per_op"].notna().any())
     emit("fig_mechanism", fig_mechanism,
          generic and "retries_per_op" in df.columns and df.retries_per_op.max() > 0)
     write_summary(df, data_dir, args.tag, selections)
